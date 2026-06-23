@@ -1,0 +1,35 @@
+# Go build artifacts
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+daedalus
+daedalus.test
+
+# Test & coverage
+*.test
+*.out
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency vendoring (uncomment if not vendoring)
+# /vendor/
+
+# Editors & OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+.env.local
+*.local
