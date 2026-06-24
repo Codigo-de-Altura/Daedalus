@@ -92,13 +92,14 @@
   Get-Content .daedalus\agents\analyst-custom\agent.yaml | Select-String "role:"
   ```
 
-- **Esperá ver:** un error accionable y código de salida `2`:
+- **Esperá ver:** un error accionable (campo / observado / esperado) y código de salida `2`:
 
   ```
-  daedalus: invalid edit to agent "analyst-custom": agent "analyst-custom" has an empty role
+  daedalus: agent "analyst-custom" is invalid; the edit was not applied:
+    - role: observed empty; expected a non-empty role/description
   ```
 
-  La segunda línea debe imprimir `2`, y la línea `role:` debe seguir mostrando tu rol del Caso 2: la edición inválida **no** dejó el archivo a medio escribir ni lo vació.
+  Después de eso, `echo $LASTEXITCODE` debe imprimir `2`, y la línea `role:` debe seguir mostrando tu rol del Caso 2: la edición inválida **no** dejó el archivo a medio escribir ni lo vació.
 
 ### Editar sin ningún flag de edición
 - **Hacé:**

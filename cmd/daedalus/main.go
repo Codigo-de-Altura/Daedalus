@@ -506,9 +506,10 @@ func runAgentEdit(args []string, stdout, stderr io.Writer) int {
 			logger.Error("agent edit failed", "phase", "load", "id", id, "err", err)
 			fmt.Fprintf(stderr, "daedalus: %v\n", err)
 			return 1
-		case isInvalidEdit(err):
+		case isSchemaInvalid(err):
 			logger.Error("agent edit rejected", "phase", "validate", "id", id, "err", err)
-			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			fmt.Fprintf(stderr, "daedalus: agent %q is invalid; the edit was not applied:\n", id)
+			writeSchemaErrors(stderr, err)
 			return 2
 		default:
 			logger.Error("agent edit failed", "phase", "write", "id", id, "err", err)
@@ -573,14 +574,29 @@ func buildEditSpec(fs *flag.FlagSet, role, prompt, promptFile string, setParams,
 	return spec, nil
 }
 
-// isInvalidEdit reports whether err is the structural-validation rejection Edit
-// returns for an edit that would leave the definition invalid. Edit wraps the
-// validation error with a stable "invalid edit" prefix; we match on that rather
-// than exporting a sentinel from the catalog because the underlying validation
-// errors are plain (formatted) errors today and 02-04 will replace them with a
-// richer schema-error type the CLI can then switch on.
-func isInvalidEdit(err error) bool {
-	return strings.Contains(err.Error(), "invalid edit to agent")
+// isSchemaInvalid reports whether err is (or wraps) a canonical-schema validation
+// failure — a *catalog.ValidationError. The catalog flows return this rich error
+// type from their pre-write gates (ticket-02-04), so the CLI detects it
+// structurally with errors.As rather than matching a message prefix, and can then
+// render each finding's field/observed/expected.
+func isSchemaInvalid(err error) bool {
+	var ve *catalog.ValidationError
+	return errors.As(err, &ve)
+}
+
+// writeSchemaErrors renders a schema validation failure as actionable lines, one
+// finding per line (field: observed / expected), so the user can fix every problem
+// in one pass (R3/R4). It falls back to the plain error text if err is not a
+// *catalog.ValidationError, so it is safe to call on any error.
+func writeSchemaErrors(w io.Writer, err error) {
+	var ve *catalog.ValidationError
+	if !errors.As(err, &ve) {
+		fmt.Fprintf(w, "  - %v\n", err)
+		return
+	}
+	for _, se := range ve.Errors {
+		fmt.Fprintf(w, "  - %s: observed %s; expected %s\n", se.Field, se.Observed, se.Expected)
+	}
 }
 
 // runAgentImport handles `daedalus agent import <path>`: it imports agent(s) from

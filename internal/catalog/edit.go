@@ -1,7 +1,6 @@
 package catalog
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -58,12 +57,14 @@ func (c *Catalog) Edit(agentsRoot, id string, spec EditSpec) (Agent, error) {
 
 	applyEdit(&a, spec)
 
-	// Validate the resulting definition before touching disk. This is the
-	// structural stand-in for the formal canonical schema (ticket-02-04, not yet
-	// implemented): id/role/prompt non-empty, kebab-case id, valid params. A
-	// failing edit returns here, leaving the existing files untouched (R5/CA5).
+	// Validate the resulting definition against the canonical schema before
+	// touching disk (schema.go). A failing edit returns here with the rich,
+	// actionable ValidationError, leaving the existing files untouched (R5/CA5).
+	// The error is returned unwrapped so the CLI can type-assert it to
+	// *ValidationError and render each finding; the "invalid edit" framing now
+	// lives in the CLI rather than in a string prefix here.
 	if err := a.Validate(); err != nil {
-		return Agent{}, fmt.Errorf("invalid edit to agent %q: %w", id, err)
+		return Agent{}, err
 	}
 
 	dir := filepath.Join(agentsRoot, id)

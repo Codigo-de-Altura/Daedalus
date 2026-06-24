@@ -143,43 +143,16 @@ func NormalizeID(source string) (string, error) {
 	return id, nil
 }
 
-// Validate checks that an agent is structurally well-formed against the canonical
-// contract: a kebab-case id, a non-empty role, a non-empty prompt, and parameters
-// whose keys are present, unique and of a known type. It is a *structural*
-// pre-check, not the formal schema validator (ticket-02-04, out of scope here);
-// its job is to guarantee every built-in is ready to pass that schema and that a
-// malformed agent can never be silently materialized. Errors name the offending
-// agent and field so they are actionable.
+// Validate reports whether the agent satisfies the canonical agent schema,
+// returning nil when valid and a *ValidationError listing every finding when not.
+// It is a thin alias that delegates to ValidateAgent (schema.go), which is the
+// single source of truth for the schema and its rules (ticket-02-04). The method
+// form is kept so the catalog flows — materialize, clone, edit, import — read as
+// `agent.Validate()` at their gates while the rules live in one place (R6). The
+// returned error is the rich, actionable ValidationError, not a flat string, so
+// callers can render field/observed/expected per finding.
 func (a Agent) Validate() error {
-	if !IsKebabCase(a.ID) {
-		// We surface the raw id even when empty so the message is unambiguous
-		// (an empty id is a common authoring mistake).
-		return fmt.Errorf("agent id %q is not valid kebab-case", a.ID)
-	}
-	if strings.TrimSpace(a.Role) == "" {
-		return fmt.Errorf("agent %q has an empty role", a.ID)
-	}
-	if strings.TrimSpace(a.Prompt) == "" {
-		return fmt.Errorf("agent %q has an empty prompt", a.ID)
-	}
-
-	seen := make(map[string]struct{}, len(a.Params))
-	for _, p := range a.Params {
-		if strings.TrimSpace(p.Key) == "" {
-			return fmt.Errorf("agent %q has a parameter with an empty key", a.ID)
-		}
-		if _, dup := seen[p.Key]; dup {
-			return fmt.Errorf("agent %q has a duplicate parameter key %q", a.ID, p.Key)
-		}
-		seen[p.Key] = struct{}{}
-		switch p.Type {
-		case ParamString, ParamNumber, ParamBool:
-			// known type
-		default:
-			return fmt.Errorf("agent %q parameter %q has unknown type %q", a.ID, p.Key, p.Type)
-		}
-	}
-	return nil
+	return ValidateAgent(a)
 }
 
 // Entry is a single listing row of the catalog: the minimum a caller needs to

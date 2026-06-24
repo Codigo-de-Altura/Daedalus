@@ -294,9 +294,10 @@ came from the built-in catalog keep their type until you edit them via the CLI.)
 
 ### Edits are validated before anything is written
 
-An edit is checked **before** it touches disk, and the write is **atomic**. If
-the result would be invalid — for example, an empty role — Daedalus rejects the
-edit with status code `2` and leaves your existing definition completely intact
+An edit is checked against the [canonical schema](#agent-validation) **before** it
+touches disk, and the write is **atomic**. If the result would be invalid — for
+example, an empty role — Daedalus rejects the edit with status code `2`, lists
+every problem it found, and leaves your existing definition completely intact
 (never half-written):
 
 ```sh
@@ -304,7 +305,8 @@ daedalus agent edit analyst-custom --role ""
 ```
 
 ```
-daedalus: invalid edit to agent "analyst-custom": agent "analyst-custom" has an empty role
+daedalus: agent "analyst-custom" is invalid; the edit was not applied:
+  - role: observed empty; expected a non-empty role/description
 ```
 
 ### Editing requires at least one change
@@ -447,17 +449,53 @@ Import summary: 0 imported, 1 already existed, 0 failed.
 ### Invalid sources
 
 A source that cannot be converted — for example, one whose role ends up empty —
-is reported with the offending file and the reason, prefixed with `!`. Other
-valid agents are still imported, but the run exits with status code `2` so you
-notice the failure:
+fails the [canonical schema](#agent-validation) and is reported with the
+offending file and every problem it found, prefixed with `!`. Other valid agents
+are still imported, but the run exits with status code `2` so you notice the
+failure:
 
 ```
-  ! .claude/agents/broken.md: agent "broken" has an empty role
+  ! .claude/agents/broken.md: agent "broken" is invalid (1 issue):
+  - role: observed empty; expected a non-empty role/description
 Import summary: 0 imported, 0 already existed, 1 failed.
 ```
 
 If the source **path** itself cannot be read at all (for example, it does not
 exist), the run fails with status code `1` and writes nothing.
+
+## Agent validation
+
+Every agent definition Daedalus writes must satisfy a single **canonical
+schema**. This schema is the quality gate behind all four operations above — it
+runs on `add`, `clone`, `edit`, and `import` — so a definition is only ever
+written when it is valid. The check looks at the definition itself; it never
+executes the agent or contacts a backend.
+
+### What the schema requires
+
+| Field | Required | Rule |
+|---|---|---|
+| `id` | Yes | Non-empty, `kebab-case` (lowercase letters/digits in dash-separated segments, e.g. `my-agent`). |
+| `role` | Yes | Non-empty. |
+| `prompt` | Yes | Non-empty. |
+| `parameters` | No | Optional. Each key must be non-empty and unique, and each value must have a known type (string, number, or bool). |
+| `version` | — | Stamped by Daedalus; not something you author. |
+
+### Actionable validation errors
+
+When a definition is invalid, Daedalus does not just say "invalid". It reports
+**every** problem at once — not only the first — so you can fix them in a single
+pass. Each finding names the **field**, what was **observed**, and what was
+**expected**:
+
+```
+daedalus: agent "analyst-custom" is invalid; the edit was not applied:
+  - role: observed empty; expected a non-empty role/description
+  - prompt: observed empty; expected a non-empty prompt
+```
+
+The findings are listed in a stable order (`id`, `role`, `prompt`, then
+`parameters`), so the same definition always produces the same report.
 
 ## Notes & limitations
 
@@ -471,6 +509,6 @@ exist), the run fails with status code `1` and writes nothing.
   Claude Code fields (`tools`, `color`), which have no canonical meaning yet.
 - Phase 1 **configures** your project's AI structure; it does not **execute**
   agents — that stays with your runtime (for example, Claude Code).
-- Edits are checked structurally before writing, but full validation against the
-  canonical schema is covered by a later feature; until then, an edit that keeps
-  the role, prompt, and parameters well-formed is accepted.
+- Every operation that writes an agent validates it against the
+  [canonical schema](#agent-validation) first; an invalid definition is reported
+  with actionable findings and never written.

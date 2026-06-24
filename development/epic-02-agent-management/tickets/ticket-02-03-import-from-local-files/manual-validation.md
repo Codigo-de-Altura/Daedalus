@@ -161,7 +161,8 @@ This agent has no description, so its role is empty.
   ```
     + drafter imported to .daedalus/agents/drafter (created 2 files).
     + reviewer imported to .daedalus/agents/reviewer (created 2 files).
-    ! .claude/agents/broken.md: agent "broken" has an empty role
+    ! .claude/agents/broken.md: agent "broken" is invalid (1 issue):
+    - role: observed empty; expected a non-empty role/description
   Import summary: 2 imported, 0 already existed, 1 failed.
   ```
 
