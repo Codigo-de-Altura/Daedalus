@@ -6,7 +6,10 @@
 *.dll
 *.so
 *.dylib
-daedalus
+# Anchored to the repo root so the compiled binary is ignored but the
+# cmd/daedalus/ source directory is not.
+/daedalus
+/daedalus.exe
 daedalus.test
 
 # Test & coverage

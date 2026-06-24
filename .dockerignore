@@ -1,0 +1,29 @@
+# Keep the build context small and reproducible: copy only what the build
+# needs. Everything below is irrelevant to compiling the binary.
+.git
+.github
+.claude
+.daedalus
+development
+*.md
+LICENSE
+
+# Local build / test artifacts
+daedalus
+daedalus.exe
+bin/
+dist/
+*.test
+*.out
+coverage.*
+
+# Docker / compose definitions themselves
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -32,7 +32,7 @@ El **chat principal de Claude Code es el orquestador**. **No implementa código 
 |---|---|
 | **Obi-Wan** (`obiwan`) | Implementación de **backend / core (Go)**: dominio, adaptadores, compilación, persistencia, logging, scaffolding de dev local (Docker, Makefile, scripts), CI. |
 | **Padmé** (`padme`) | Implementación de **frontend / TUI (Charm)**: Bubble Tea, Lipgloss, Bubbles, Glamour, Huh; UX, atajos, render de markdown. |
-| **C-3PO** (`c3po`) | **Technical writer**: escribe/actualiza `documentation.md` (guía de uso para el **usuario final** del producto). |
+| **C-3PO** (`c3po`) | **Technical writer**: mantiene el **manual de usuario** en `docs/` (organizado como manual: índice + capítulos, fácil de seguir) y deja un **puntero** en el `documentation.md` del ticket. |
 | **Yoda** (`yoda`) | **Validador backend**: corre la `validation.md` de tickets de backend/core. No implementa. |
 | **Leia** (`leia`) | **Validadora frontend**: corre la `validation.md` de tickets de frontend/TUI. No implementa. |
 
@@ -52,7 +52,7 @@ El orquestador procesa los tickets del epic **en orden**. Por cada ticket:
    - El prompt al implementador referencia, además de la spec, el `epic.md` del ticket y —cuando haga falta contexto profundo— el `PRD.md` (por RF/D citado) y el `init.md`. Si el implementador topa con ambigüedad que la spec no resuelve, consulta esas referencias; si sigue ambigua, **se detiene y reporta** al orquestador en vez de adivinar.
 2. **Validación automática.** El validador corre `validation.md`:
    - **backend** → **Yoda** · **frontend** → **Leia**. El validador **solo reporta**, nunca arregla.
-   - **Si PASA** → **C-3PO** escribe/actualiza `documentation.md`. Luego, si el ticket tiene `manual-validation.md`, **el workflow SE DETIENE** y queda en manos del usuario la validación manual.
+   - **Si PASA** → **C-3PO** actualiza el **manual de usuario** en `docs/` (el capítulo del feature) y deja el **puntero** en `documentation.md`. Luego, si el ticket tiene `manual-validation.md`, **el workflow SE DETIENE** y queda en manos del usuario la validación manual.
    - **Si FALLA** → el orquestador escribe/actualiza `observations.md` (en inglés, un hallazgo por ítem, con severidad y comportamiento esperado) y **reasigna** la implementación al implementador correspondiente, que corrige **basándose solo en ese documento**. **Loop validación↔fix hasta que pase.**
 3. El orquestador **continúa ticket por ticket** hasta toparse con una **validación manual**, donde se detiene.
 4. **Al finalizar una implementación**, el orquestador **presenta el plan/resumen al usuario**.
@@ -85,12 +85,24 @@ development/
         ticket-NN-MM-<slug>/
           <slug>.md                # SPEC del ticket: el feature a implementar (qué/requerimientos/criterios)
           validation.md            # validación AUTOMÁTICA: cómo validar el feature (la corre el validador)
-          documentation.md         # guía de uso para el USUARIO FINAL (la escribe C-3PO)
+          documentation.md         # PUNTERO al capítulo del manual de usuario en docs/ (lo mantiene C-3PO)
           manual-validation.md     # OPCIONAL: casos de prueba manuales para alguien sin background de testing
           observations.md          # se CREA solo si la validación automática falla (feedback para reimplementar)
 ```
 
 **Convenciones de nombres:** `kebab-case`. Epics: `epic-NN-<slug>`. Tickets: `ticket-NN-MM-<slug>` (NN = epic, MM = secuencia dentro del epic). La carpeta del ticket es su id.
+
+### Manual de usuario en `docs/`
+
+La **documentación de producto** (guía de uso para el usuario final) **no** vive en `development/`: vive en `docs/` en la raíz del repo, organizada como un **manual** (índice + capítulos, fácil de seguir). `development/` contiene solo el **backlog SDD** (spec, validación, validación manual, observaciones). Cada `documentation.md` de un ticket es un **puntero** al capítulo correspondiente del manual. C-3PO mantiene el manual **a la par** de cada feature implementado.
+
+```
+docs/
+  README.md                 # índice del manual
+  getting-started/          # instalación, quickstart
+  guide/                    # uso del producto (CLI, comandos, configuración)
+  contributing/             # trabajar sobre Daedalus (build, tooling, CI)
+```
 
 ### Contrato de documentos del ticket
 
@@ -98,7 +110,7 @@ development/
 |---|---|---|
 | `<slug>.md` | Humano / planner | **Spec** del feature: descripción, requerimientos, criterios de aceptación. |
 | `validation.md` | Humano / planner | Cómo **validar automáticamente** que el feature quedó bien. Ejecutable/verificable por un agente (Yoda/Leia). |
-| `documentation.md` | **C-3PO** | **Guía de uso para el usuario final** (quien clona/descarga el producto), no internals. Alimenta una guía de uso creciente. |
+| `documentation.md` | **C-3PO** | **Puntero** al capítulo correspondiente del **manual de usuario** (`docs/`). El manual —no este archivo— es la guía de uso creciente para quien clona/descarga el producto. |
 | `manual-validation.md` | Humano / planner | **Casos de prueba manuales** para alguien sin background de testing: qué probar, cómo correrlo y qué esperar. **No para todos los tickets**; específico, no redundante. |
 | `observations.md` | Orquestador (desde el verdict del validador) | Observaciones cuando la validación automática **falla**; feedback accionable para reimplementar. Se crea/actualiza en cada fallo. |
 
