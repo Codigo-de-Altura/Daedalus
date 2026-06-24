@@ -2,7 +2,7 @@
 name: obiwan
 description: Backend / core engineer — Go, clean architecture, CQRS-when-needed, logging/telemetry, local dev scaffolding (Docker, Makefile, scripts)
 tools: Read, Edit, Write, Glob, Grep, Bash, Agent
-model: sonnet
+model: opus
 color: blue
 ---
 

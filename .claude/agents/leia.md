@@ -2,7 +2,7 @@
 name: leia
 description: Frontend validator — runs a TUI ticket's validation.md, advocates for the user, reports verdict only, never implements
 tools: Read, Glob, Grep, Bash, Write
-model: sonnet
+model: opus
 color: red
 ---
 

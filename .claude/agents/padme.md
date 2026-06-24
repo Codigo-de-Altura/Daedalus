@@ -2,7 +2,7 @@
 name: padme
 description: Frontend / TUI engineer — Charm (Bubble Tea, Lipgloss, Bubbles, Glamour, Huh), polished UX, keyboard ergonomics, markdown rendering
 tools: Read, Edit, Write, Glob, Grep, Bash, Agent
-model: sonnet
+model: opus
 color: magenta
 ---
 
