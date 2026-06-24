@@ -518,6 +518,7 @@ Daedalus · Prompts
 | `↑` / `k` | Move the selection up. |
 | `↓` / `j` | Move the selection down. |
 | `enter` / `l` | Open the preview for the selected prompt. |
+| `tab` | Switch section (Prompts ↔ Workflows). See [Visualizing a workflow in the TUI](managing-workflows.md#visualizing-a-workflow-in-the-tui). |
 | `?` | Toggle the help footer (short ↔ full). |
 | `q` / `Ctrl+C` | Quit. |
 

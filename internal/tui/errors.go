@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
+	"github.com/Codigo-de-Altura/Daedalus/internal/workflows"
 )
 
 // composeErrorMessage turns a prompt resolution failure into a human-readable,
@@ -46,6 +47,33 @@ func composeErrorMessage(id string, err error) string {
 
 	// Fallback: surface the error plainly rather than rendering broken content.
 	return fmt.Sprintf("Cannot compose %q: %v", id, err)
+}
+
+// workflowLoadErrorMessage turns a workflow load failure into a human-readable,
+// actionable message for the DAG view's error state (R7/CA7). It distinguishes the
+// two typed load failures the core reports — a workflow that does not exist and a
+// malformed (unparseable) file — so the user knows whether to create the workflow
+// or fix its YAML, instead of seeing a raw error. It branches with errors.Is on
+// the core's sentinels rather than on message text, so it stays correct if the
+// core rewords its messages. Any other failure falls back to a clear generic line.
+func workflowLoadErrorMessage(name string, err error) string {
+	if err == nil {
+		return ""
+	}
+
+	if errors.Is(err, workflows.ErrWorkflowNotFound) {
+		return fmt.Sprintf("Cannot open %q: the workflow no longer exists.", name)
+	}
+
+	if errors.Is(err, workflows.ErrMalformedWorkflow) {
+		return fmt.Sprintf(
+			"Cannot read %q: the workflow file is malformed.\n\n%v\n\n"+
+				"Fix the YAML in .daedalus/workflows/%s.yaml and try again.",
+			name, err, name)
+	}
+
+	// Fallback: surface the error plainly rather than rendering broken content.
+	return fmt.Sprintf("Cannot load %q: %v", name, err)
 }
 
 // joinChain renders an inclusion cycle chain (e.g. ["a","b","a"]) as an arrowed

@@ -13,12 +13,16 @@ In an interactive terminal:
 ./daedalus
 ```
 
-The interface opens on the **prompt browser**, which lists the prompts in the
+The interface opens on the **Prompts** section, which lists the prompts in the
 current directory's workspace and lets you preview any of them as composed,
-rendered Markdown. See
-[Previewing prompts in the interface](managing-prompts.md#previewing-prompts-in-the-interface)
-for the full walkthrough and keyboard shortcuts. A help line at the bottom shows
-the keys available on the current screen.
+rendered Markdown. Press `tab` to switch to the **Workflows** section, which
+lists the workspace's workflows and draws any of them as a read-only graph (DAG).
+A help line at the bottom shows the keys available on the current screen. See:
+
+- [Previewing prompts in the interface](managing-prompts.md#previewing-prompts-in-the-interface)
+  — browsing and previewing prompts.
+- [Visualizing a workflow in the TUI](managing-workflows.md#visualizing-a-workflow-in-the-tui)
+  — switching sections and reading the DAG.
 
 ### Quitting
 

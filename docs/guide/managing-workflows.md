@@ -411,6 +411,138 @@ daedalus: workflow not found: "ghost"
 the workflow must already exist; create it first
 ```
 
+## Visualizing a workflow in the TUI
+
+Besides the commands above, Daedalus has an interactive terminal interface that
+can draw a workflow as a **graph (DAG)**, so you can see the pipeline's shape —
+its phases and how they depend on each other — without reading the YAML. The view
+is **read-only**: it never edits or runs anything.
+
+### Switching to the Workflows section
+
+Run `daedalus` with no subcommand in an interactive terminal:
+
+```sh
+daedalus
+```
+
+The interface opens on the **Prompts** section. Press `tab` to switch between the
+**Prompts** and **Workflows** sections; the title changes to `Daedalus ·
+Workflows` and the list shows every workflow in the current directory's
+`.daedalus/workflows/`, each with its name and phase count:
+
+```
+Daedalus · Workflows
+
+  release-pipeline  [2 phases]
+```
+
+> The browser reads the `.daedalus/workflows/` of the directory you launch it
+> from, so run it from inside your project.
+
+Each section keeps its own selection, so pressing `tab` to switch back returns
+you to where you were.
+
+### Browsing the list
+
+| Key | Action |
+|---|---|
+| `↑` / `k` | Move the selection up. |
+| `↓` / `j` | Move the selection down. |
+| `enter` / `l` | Open the DAG view for the selected workflow. |
+| `tab` | Switch section (Prompts ↔ Workflows). |
+| `?` | Toggle the help footer (short ↔ full). |
+| `q` / `Ctrl+C` | Quit. |
+
+### Reading the DAG
+
+Press `enter` (or `l`) on a workflow to open its DAG view. A header names the
+workflow, and the graph is laid out **top to bottom in dependency order** —
+roots (the phases nothing depends on) at the top, their dependents below — so the
+pipeline reads from start to finish.
+
+Each phase is drawn as a bordered **node**. Its headline is the phase id followed
+by the agent that runs it, written `@<agent>`; below it, when present, a compact
+line each for the phase's inputs, outputs, and gate. A phase with no inputs,
+outputs, or gate simply omits those lines. A node looks like this:
+
+```
+╭─────────────────────╮
+│ spec  @analyst      │
+│ in:  brief          │
+│ out: spec           │
+│ gate: spec-gate     │
+╰─────────────────────╯
+```
+
+Between nodes, a vertical **connector** shows the dependency edge. When a phase
+depends on earlier phases, the connector is labelled `after <predecessors>` (the
+ids from its `depends_on`); the arrow points down to the phase the edge leads
+into:
+
+```
+  │  after spec
+  ↓
+╭─────────────────────╮
+│ build  @architect   │
+│ in:  spec           │
+│ out: design         │
+│ gate: design-gate   │
+╰─────────────────────╯
+```
+
+### Moving around and leaving the view
+
+The DAG scrolls within the view, and a hint at the bottom shows your position
+through a long graph:
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Scroll one line. |
+| `pgup` / `pgdn` | Scroll one page (also `b` / `f` / `space`). |
+| `g` / `G` | Jump to the top / bottom. |
+| `esc` | Return to the list. |
+| `?` | Toggle the help footer. |
+| `Ctrl+C` | Quit. |
+
+`esc` is the way back to the list; inside the DAG view, `q` is reserved so you do
+not leave the app by accident while reading. The view never changes the workflow
+— to edit it, use the `daedalus workflow` commands above.
+
+### Empty, unreadable, and cyclic workflows
+
+The view degrades gracefully when there is nothing — or nothing valid — to draw:
+
+- **Empty workflow.** A workflow with no phases is a valid document; the view says
+  so and points you to the next step instead of showing a blank graph:
+
+  ```
+  This workflow is empty.
+
+  Add phases with `daedalus workflow add-phase`.
+  ```
+
+- **Unreadable workflow.** If the file cannot be loaded, the view shows a readable
+  error message instead of broken content, and the app keeps running. Return to
+  the list with `esc`.
+
+- **Dependency cycle.** If the phases depend on each other in a loop, the view does
+  not hang. It draws the phases in their declared order and shows a warning at the
+  top:
+
+  ```
+  ! dependency cycle detected — phases shown in declared order
+  ```
+
+If the Workflows list itself is empty, it tells you so and points you at the CLI:
+
+```
+No workflows found.
+
+Create one with `daedalus workflow create`, or run `daedalus init`
+if this directory is not a Daedalus workspace yet.
+```
+
 ## Notes & limitations
 
 - Workflows are persisted as YAML files under `.daedalus/workflows/`, one file
@@ -426,6 +558,8 @@ the workflow must already exist; create it first
   the workflow). It does **not** yet check the graph's *meaning* — there is no
   cycle detection and no check that a `depends_on`, `inputs`, or `agent`
   reference resolves to something that exists.
+- The interactive DAG view is strictly **read-only**: it draws the pipeline but
+  has no binding that edits a phase or runs the workflow.
 - Phase 1 **models, edits, and validates** a workflow's definition; it does not
   **execute** workflows — running the pipeline stays with your runtime (for
   example, Claude Code).

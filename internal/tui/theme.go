@@ -33,6 +33,20 @@ type theme struct {
 	errorBox lipgloss.Style
 	// previewFrame styles the bordered area that wraps the scrollable preview body.
 	previewFrame lipgloss.Style
+
+	// --- workflow DAG view (ticket 04-02) ---
+	// dagNode styles a phase box (a DAG node): a rounded, accent-bordered card so
+	// each phase reads as a distinct unit of the pipeline.
+	dagNode lipgloss.Style
+	// dagNodeID styles the phase id inside a node (the node's headline).
+	dagNodeID lipgloss.Style
+	// dagAgent styles the agent label inside a node (who runs the phase).
+	dagAgent lipgloss.Style
+	// dagMeta styles a node's compact inputs/outputs/gate metadata lines.
+	dagMeta lipgloss.Style
+	// dagEdge styles the vertical connectors drawn between nodes so the pipeline's
+	// direction (predecessor → successor) is legible.
+	dagEdge lipgloss.Style
 }
 
 // defaultTheme builds the shared theme. Colors use 256-color codes so the look
@@ -71,6 +85,19 @@ func defaultTheme() theme {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(accent).
 			Padding(0, 1),
+		dagNode: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(accent).
+			Padding(0, 1),
+		dagNodeID: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("252")),
+		dagAgent: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("39")),
+		dagMeta: lipgloss.NewStyle().
+			Foreground(muted),
+		dagEdge: lipgloss.NewStyle().
+			Foreground(accent),
 	}
 }
 
