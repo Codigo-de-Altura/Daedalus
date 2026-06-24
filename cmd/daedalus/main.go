@@ -189,6 +189,10 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		return runAgentList(args[1:], stdout, stderr)
 	case "add":
 		return runAgentAdd(args[1:], stdout, stderr)
+	case "clone":
+		return runAgentClone(args[1:], stdout, stderr)
+	case "edit":
+		return runAgentEdit(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "daedalus: unknown agent operation %q\n\n%s", args[0], agentUsage)
 		return 2
@@ -198,11 +202,13 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 // agentUsage is the shared help text for the `agent` subcommand, surfaced when no
 // operation (or an unknown one) is given.
 const agentUsage = "Usage: daedalus agent <operation> [flags]\n\n" +
-	"Work with the built-in agent catalog.\n\n" +
+	"Work with the agent catalog and workspace agents.\n\n" +
 	"Operations:\n" +
-	"  list           list the built-in catalog agents (id and role)\n" +
-	"  add <id>       materialize a catalog agent into .daedalus/agents/\n\n" +
-	"Run 'daedalus agent add --help' for the add flags.\n"
+	"  list                       list the built-in catalog agents (id and role)\n" +
+	"  add <id>                   materialize a catalog agent into .daedalus/agents/\n" +
+	"  clone <src> <dest>         copy a built-in agent to a new id you can edit\n" +
+	"  edit <id> [flags]          edit a workspace agent's role, prompt or parameters\n\n" +
+	"Run 'daedalus agent <operation> --help' for an operation's flags.\n"
 
 // runAgentList handles `daedalus agent list`: it prints the built-in agents
 // (id + role) to stdout in deterministic, id-sorted order. It takes no target
@@ -348,6 +354,232 @@ func writeAgentResult(stdout io.Writer, res *catalog.MaterializeResult) {
 	}
 }
 
+// runAgentClone handles `daedalus agent clone <source-id> <dest-id>`: it copies a
+// built-in catalog agent to a new, editable id under .daedalus/agents/, reusing
+// the catalog's Plan/Apply split. It is non-destructive — a dest id that already
+// exists is reported as a conflict rather than overwritten (R4/CA4) — and
+// --preview reports the files that would be created without writing anything.
+func runAgentClone(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus agent clone", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/agents/ the clone is written to")
+	preview := fs.Bool("preview", false, "show the files that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus agent clone <source-id> <dest-id> [flags]\n\n"+
+			"Copy a built-in catalog agent to a new id in the target workspace's\n"+
+			".daedalus/agents/ directory. The clone is an independent canonical\n"+
+			"definition you can edit without affecting the built-in. If the dest id\n"+
+			"already exists it is not overwritten.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	// Two positional ids (source, dest) sit among the flags; split them out first
+	// so they can appear before or after the flags (Go's parser stops at the first
+	// non-flag token otherwise).
+	ids, flags := splitPositionals(args)
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if len(ids) != 2 {
+		fmt.Fprint(stderr, "daedalus: agent clone requires exactly a source id and a dest id\n\n")
+		fs.Usage()
+		return 2
+	}
+	sourceID, destID := ids[0], ids[1]
+
+	logger := logging.New(stderr)
+	agentsRoot := filepath.Join(*dir, workspace.Name, catalog.AgentsDir)
+
+	// Plan first: validates the dest id (kebab-case) and the source (known agent)
+	// and renders the clone's content without touching the filesystem, so an
+	// invalid/unknown id fails as a usage error before any write or preview.
+	plan, err := catalog.Builtin.ClonePlanFor(agentsRoot, sourceID, destID)
+	if err != nil {
+		logger.Error("agent clone rejected", "phase", "plan", "source", sourceID, "dest", destID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		if errors.Is(err, catalog.ErrAgentNotFound) {
+			fmt.Fprint(stderr, "run 'daedalus agent list' to see the available agents\n")
+		}
+		return 2
+	}
+
+	logger.Info("agent clone planned", "source", sourceID, "dest", plan.AgentID, "dir", plan.Dir, "files", len(plan.Files))
+
+	if *preview {
+		writeAgentPreview(stdout, plan)
+		logger.Info("agent clone preview only", "dest", plan.AgentID, "applied", false)
+		return 0
+	}
+
+	res, err := plan.Apply()
+	if err != nil {
+		logger.Error("agent clone failed", "phase", "apply", "dest", destID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: agent clone failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("agent cloned",
+		"source", sourceID,
+		"dest", res.AgentID,
+		"already_existed", res.AlreadyExisted(),
+		"created", len(res.Created),
+		"skipped", len(res.Skipped))
+
+	writeAgentResult(stdout, res)
+	return 0
+}
+
+// runAgentEdit handles `daedalus agent edit <id>`: it edits a workspace agent's
+// canonical definition in place (role, prompt and/or parameters). The edit is
+// validated structurally before any write, so an edit that would leave the
+// definition invalid (e.g. an empty role) is rejected with an actionable error
+// and the existing files are left intact (R5/CA5). Writes are atomic.
+func runAgentEdit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus agent edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/agents/ holds the agent")
+	role := fs.String("role", "", "set the agent's role/description")
+	prompt := fs.String("prompt", "", "set the agent's prompt inline")
+	promptFile := fs.String("prompt-file", "", "set the agent's prompt from a file (takes precedence over --prompt)")
+	var setParams multiFlag
+	var removeParams multiFlag
+	fs.Var(&setParams, "set-param", "add or update a parameter as key=value (repeatable)")
+	fs.Var(&removeParams, "remove-param", "remove a parameter by key (repeatable)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus agent edit <id> [flags]\n\n"+
+			"Edit a workspace agent's canonical definition (role, prompt, parameters).\n"+
+			"At least one edit flag is required. The edit is validated before writing;\n"+
+			"an invalid edit is rejected and the existing definition is left intact.\n\n"+
+			"If both --prompt-file and --prompt are given, --prompt-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitAgentID(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	// Build the edit spec from the flags. We track which flags were actually set
+	// (visited) so passing --role "" is a deliberate (and invalid) edit rather
+	// than indistinguishable from not passing --role at all.
+	spec, err := buildEditSpec(fs, *role, *prompt, *promptFile, setParams, removeParams)
+	if err != nil {
+		logger.Error("agent edit rejected", "phase", "flags", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return 2
+	}
+	if spec.IsEmpty() {
+		fmt.Fprint(stderr, "daedalus: agent edit requires at least one edit flag "+
+			"(--role, --prompt, --prompt-file, --set-param, --remove-param)\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	agentsRoot := filepath.Join(*dir, workspace.Name, catalog.AgentsDir)
+
+	edited, err := catalog.Builtin.Edit(agentsRoot, id, spec)
+	if err != nil {
+		// An unknown/absent agent or a malformed id is a usage error (exit 2); an
+		// edit that fails validation is also a usage error (the fix is the input).
+		// A genuine I/O failure is exit 1.
+		switch {
+		case errors.Is(err, catalog.ErrAgentNotFound):
+			logger.Error("agent edit rejected", "phase", "load", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			fmt.Fprint(stderr, "the agent must already exist in the workspace; clone or add it first\n")
+			return 2
+		case errors.Is(err, catalog.ErrMalformedDefinition):
+			logger.Error("agent edit failed", "phase", "load", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 1
+		case isInvalidEdit(err):
+			logger.Error("agent edit rejected", "phase", "validate", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		default:
+			logger.Error("agent edit failed", "phase", "write", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: agent edit failed: %v\n", err)
+			return 1
+		}
+	}
+
+	logger.Info("agent edited", "id", edited.ID, "params", len(edited.Params))
+	fmt.Fprintf(stdout, "Edited agent %q at %s.\n",
+		edited.ID, filepath.ToSlash(filepath.Join(agentsRoot, edited.ID)))
+	return 0
+}
+
+// buildEditSpec assembles a catalog.EditSpec from the parsed edit flags. It uses
+// fs.Visit to learn which flags the user actually passed, so an explicit empty
+// value (e.g. --role "") is recorded as a (rejectable) change rather than
+// confused with the flag's default. --prompt-file takes precedence over --prompt
+// when both are given (documented in Usage); the file content becomes the prompt.
+func buildEditSpec(fs *flag.FlagSet, role, prompt, promptFile string, setParams, removeParams multiFlag) (catalog.EditSpec, error) {
+	var spec catalog.EditSpec
+
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	if set["role"] {
+		spec.SetRole = true
+		spec.Role = role
+	}
+	// Prompt precedence: --prompt-file wins over --prompt so a caller can keep a
+	// long prompt in a file without it being shadowed by an accidental inline one.
+	switch {
+	case set["prompt-file"]:
+		b, err := os.ReadFile(promptFile)
+		if err != nil {
+			return catalog.EditSpec{}, fmt.Errorf("reading --prompt-file: %w", err)
+		}
+		spec.SetPrompt = true
+		spec.Prompt = string(b)
+	case set["prompt"]:
+		spec.SetPrompt = true
+		spec.Prompt = prompt
+	}
+
+	for _, raw := range setParams {
+		key, value, ok := strings.Cut(raw, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return catalog.EditSpec{}, fmt.Errorf("--set-param %q must be key=value", raw)
+		}
+		// The CLI cannot know a user's intended type, so every CLI-set parameter is
+		// a string. Typed parameters (numbers/bools) come from the built-in catalog
+		// and survive a round-trip untouched; editing them via the CLI converts them
+		// to strings, which is the safe, lossless-for-text default.
+		spec.SetParams = append(spec.SetParams, catalog.Param{
+			Key:   strings.TrimSpace(key),
+			Type:  catalog.ParamString,
+			Value: value,
+		})
+	}
+	spec.RemoveParams = append(spec.RemoveParams, removeParams...)
+
+	return spec, nil
+}
+
+// isInvalidEdit reports whether err is the structural-validation rejection Edit
+// returns for an edit that would leave the definition invalid. Edit wraps the
+// validation error with a stable "invalid edit" prefix; we match on that rather
+// than exporting a sentinel from the catalog because the underlying validation
+// errors are plain (formatted) errors today and 02-04 will replace them with a
+// richer schema-error type the CLI can then switch on.
+func isInvalidEdit(err error) bool {
+	return strings.Contains(err.Error(), "invalid edit to agent")
+}
+
 // writePreview renders, on stdout, the directories and root artifacts a plan
 // would create. It lists nothing for an already-complete workspace so an
 // idempotent re-run produces an explicit "nothing to update" preview.
@@ -407,27 +639,34 @@ func splitBackends(raw string) []string {
 	return out
 }
 
-// valueFlags are the `agent add` flags that take a separate value token (e.g.
-// `--path x`). splitAgentID consults this set so it does not mistake a flag's
-// value for the positional agent id. Boolean flags (--preview) are absent
-// because they never consume a following token.
+// valueFlags are the agent-subcommand flags that take a separate value token
+// (e.g. `--path x`, `--role x`). The positional splitter consults this set so it
+// never mistakes a flag's value for a positional agent id. It is the union across
+// the agent operations — harmless to over-list, since a flag a given operation
+// does not define simply never appears in its args. Boolean flags (--preview) are
+// absent because they never consume a following token. Both the single-dash and
+// double-dash spellings the Go flag parser accepts are listed.
 var valueFlags = map[string]struct{}{
 	"-path": {}, "--path": {},
+	"-role": {}, "--role": {},
+	"-prompt": {}, "--prompt": {},
+	"-prompt-file": {}, "--prompt-file": {},
+	"-set-param": {}, "--set-param": {},
+	"-remove-param": {}, "--remove-param": {},
 }
 
-// splitAgentID extracts the single positional agent id from an `agent add`
-// argument list, returning it plus the remaining (flag) tokens in order. It
-// exists because Go's flag parser stops at the first non-flag token: without
-// pulling the id out first, `add <id> --path x` would leave --path unparsed.
-// Exactly one positional is required; zero or more than one is a usage error so
-// a typo like `add analyst architect` is caught instead of silently ignored. A
-// `--help`/`-h` token is left in flags so the flag parser can handle it normally.
+// splitPositionals separates the positional tokens from the flag tokens in an
+// agent-subcommand argument list, preserving order within each group. It exists
+// because Go's flag parser stops at the first non-flag token: without pulling the
+// positionals (the agent ids) out first, `clone <src> <dest> --path x` or
+// `edit <id> --role x` would leave the flags unparsed.
 //
-// It is value-flag aware: the token after `--path` is that flag's value, not the
-// id, unless the flag already carries its value inline (`--path=x`).
-func splitAgentID(args []string) (id string, flags []string, err error) {
+// It is value-flag aware: the token after a value-taking flag (e.g. `--role`) is
+// that flag's value — not a positional — unless the flag carries its value inline
+// (`--role=x`). The split is purely syntactic; the caller enforces how many
+// positionals an operation expects.
+func splitPositionals(args []string) (positionals, flags []string) {
 	flags = make([]string, 0, len(args))
-	var positionals []string
 	expectValue := false
 	for _, a := range args {
 		if expectValue {
@@ -438,7 +677,7 @@ func splitAgentID(args []string) (id string, flags []string, err error) {
 		}
 		if strings.HasPrefix(a, "-") {
 			flags = append(flags, a)
-			// A `--path x` form (no '=') consumes the next token as its value.
+			// A `--flag x` form (no '=') consumes the next token as its value.
 			if _, takesValue := valueFlags[a]; takesValue {
 				expectValue = true
 			}
@@ -446,6 +685,16 @@ func splitAgentID(args []string) (id string, flags []string, err error) {
 		}
 		positionals = append(positionals, a)
 	}
+	return positionals, flags
+}
+
+// splitAgentID extracts the single positional agent id from an argument list,
+// returning it plus the remaining (flag) tokens. Exactly one positional is
+// required; zero or more than one is a usage error so a typo like
+// `add analyst architect` is caught instead of silently ignored. A `--help`/`-h`
+// token is allowed without an id so the caller's parser can show usage.
+func splitAgentID(args []string) (id string, flags []string, err error) {
+	positionals, flags := splitPositionals(args)
 	// A help request is valid without an id; let the caller's parser show usage.
 	for _, f := range flags {
 		if f == "-h" || f == "--help" {
@@ -456,10 +705,22 @@ func splitAgentID(args []string) (id string, flags []string, err error) {
 	case 1:
 		return positionals[0], flags, nil
 	case 0:
-		return "", flags, errors.New("agent add requires exactly one agent id")
+		return "", flags, errors.New("this operation requires exactly one agent id")
 	default:
-		return "", flags, fmt.Errorf("agent add requires exactly one agent id, got %d", len(positionals))
+		return "", flags, fmt.Errorf("this operation requires exactly one agent id, got %d", len(positionals))
 	}
+}
+
+// multiFlag is a repeatable string flag: each occurrence appends its value, so
+// `--set-param a=1 --set-param b=2` collects both. It implements flag.Value so it
+// plugs into the standard flag parser without a dependency.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
 }
 
 // plural picks the singular or plural suffix for n, keeping result messages

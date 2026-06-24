@@ -171,8 +171,18 @@ func (c *Catalog) MaterializePlanFor(agentsRoot, id string) (*MaterializePlan, e
 		return nil, err
 	}
 
+	return planMaterialize(agentsRoot, a), nil
+}
+
+// planMaterialize builds the (pure) MaterializePlan for an already-resolved,
+// already-validated agent under agentsRoot. It is the single place that fixes the
+// on-disk shape — directory `<agentsRoot>/<id>` holding the definition then the
+// prompt, in that deterministic order — so materialize, clone and any future
+// producer of agent files render identically (R6/CA6). Callers must validate the
+// agent first; this function performs no validation and no I/O.
+func planMaterialize(agentsRoot string, a Agent) *MaterializePlan {
 	dir := filepath.Join(agentsRoot, a.ID)
-	plan := &MaterializePlan{
+	return &MaterializePlan{
 		AgentID:    a.ID,
 		AgentsRoot: agentsRoot,
 		Dir:        dir,
@@ -183,7 +193,6 @@ func (c *Catalog) MaterializePlanFor(agentsRoot, id string) (*MaterializePlan, e
 			{Name: PromptFileName, Path: filepath.Join(dir, PromptFileName), Content: renderPrompt(a)},
 		},
 	}
-	return plan, nil
 }
 
 // Apply writes the planned files non-destructively: it creates the agent

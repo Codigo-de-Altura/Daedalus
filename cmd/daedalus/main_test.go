@@ -217,6 +217,193 @@ func TestRunAgentDispatchedFromRun(t *testing.T) {
 	}
 }
 
+// TestRunAgentCloneCreatesIndependentDef covers manual-validation Caso 1: `agent
+// clone analyst analyst-custom` creates a new definition under the dest id.
+func TestRunAgentCloneCreatesIndependentDef(t *testing.T) {
+	dir := t.TempDir()
+
+	code, stdout, stderr := runAgentCmd("clone", "analyst", "analyst-custom", "--path", dir)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Materialized") {
+		t.Errorf("stdout does not confirm the clone; got:\n%s", stdout)
+	}
+	agentDir := filepath.Join(dir, ".daedalus", "agents", "analyst-custom")
+	for _, name := range []string{"agent.yaml", "prompt.md"} {
+		if _, err := os.Stat(filepath.Join(agentDir, name)); err != nil {
+			t.Errorf("expected cloned file %q: %v", name, err)
+		}
+	}
+}
+
+// TestRunAgentEditPersistsAndLeavesBuiltinIntact covers manual-validation Casos
+// 2-3: editing the clone (role/prompt/param) persists, and the built-in original
+// is unaffected (it is an in-binary literal, so `agent list` still shows its
+// original role).
+func TestRunAgentEditPersistsAndLeavesBuiltinIntact(t *testing.T) {
+	dir := t.TempDir()
+
+	if code, _, stderr := runAgentCmd("clone", "analyst", "analyst-custom", "--path", dir); code != 0 {
+		t.Fatalf("clone exit code = %d, want 0; stderr:\n%s", code, stderr)
+	}
+
+	code, stdout, stderr := runAgentCmd("edit", "analyst-custom", "--path", dir,
+		"--role", "Custom role", "--prompt", "Custom prompt body", "--set-param", "model=custom-x")
+	if code != 0 {
+		t.Fatalf("edit exit code = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Edited") {
+		t.Errorf("stdout does not confirm the edit; got:\n%s", stdout)
+	}
+
+	def, _ := os.ReadFile(filepath.Join(dir, ".daedalus", "agents", "analyst-custom", "agent.yaml"))
+	prompt, _ := os.ReadFile(filepath.Join(dir, ".daedalus", "agents", "analyst-custom", "prompt.md"))
+	if !strings.Contains(string(def), "Custom role") {
+		t.Errorf("edited role not persisted; got:\n%s", def)
+	}
+	if !strings.Contains(string(def), "model: custom-x") {
+		t.Errorf("edited param not persisted; got:\n%s", def)
+	}
+	if !strings.Contains(string(prompt), "Custom prompt body") {
+		t.Errorf("edited prompt not persisted; got:\n%s", prompt)
+	}
+
+	// The built-in original is unchanged: list still shows analyst's original role.
+	_, listOut, _ := runAgentCmd("list")
+	if strings.Contains(listOut, "Custom role") {
+		t.Errorf("editing a clone leaked into the built-in catalog listing:\n%s", listOut)
+	}
+}
+
+// TestRunAgentEditFromPromptFile covers --prompt-file and its precedence over
+// --prompt.
+func TestRunAgentEditFromPromptFile(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, stderr := runAgentCmd("clone", "analyst", "analyst-custom", "--path", dir); code != 0 {
+		t.Fatalf("clone exit code = %d; stderr:\n%s", code, stderr)
+	}
+
+	pf := filepath.Join(dir, "prompt.txt")
+	if err := os.WriteFile(pf, []byte("PROMPT FROM FILE"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both --prompt and --prompt-file given: the file must win.
+	code, _, stderr := runAgentCmd("edit", "analyst-custom", "--path", dir,
+		"--prompt", "INLINE", "--prompt-file", pf)
+	if code != 0 {
+		t.Fatalf("edit exit code = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	prompt, _ := os.ReadFile(filepath.Join(dir, ".daedalus", "agents", "analyst-custom", "prompt.md"))
+	if !strings.Contains(string(prompt), "PROMPT FROM FILE") || strings.Contains(string(prompt), "INLINE") {
+		t.Errorf("--prompt-file did not take precedence over --prompt; got:\n%s", prompt)
+	}
+}
+
+// TestRunAgentEditInvalidLeavesIntact covers Check 5/CA5: an edit that empties the
+// role is rejected (exit 2) with an actionable message, and the file is intact.
+func TestRunAgentEditInvalidLeavesIntact(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, stderr := runAgentCmd("clone", "analyst", "analyst-custom", "--path", dir); code != 0 {
+		t.Fatalf("clone exit code = %d; stderr:\n%s", code, stderr)
+	}
+	defPath := filepath.Join(dir, ".daedalus", "agents", "analyst-custom", "agent.yaml")
+	before, _ := os.ReadFile(defPath)
+
+	code, _, stderr := runAgentCmd("edit", "analyst-custom", "--path", dir, "--role", "")
+	if code != 2 {
+		t.Fatalf("exit code = %d for an invalid edit, want 2", code)
+	}
+	if !strings.Contains(stderr, "role") {
+		t.Errorf("stderr does not name the offending field; got:\n%s", stderr)
+	}
+	if after, _ := os.ReadFile(defPath); string(after) != string(before) {
+		t.Errorf("invalid edit modified the definition on disk")
+	}
+}
+
+// TestRunAgentEditNoFlagsIsUsageError covers the no-op guard: edit with no edit
+// flag is a usage error (exit 2), not a silent rewrite.
+func TestRunAgentEditNoFlagsIsUsageError(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, _ := runAgentCmd("clone", "analyst", "analyst-custom", "--path", dir); code != 0 {
+		t.Fatalf("clone failed")
+	}
+	if code, _, _ := runAgentCmd("edit", "analyst-custom", "--path", dir); code != 2 {
+		t.Errorf("exit code = %d for edit with no flags, want 2", code)
+	}
+}
+
+// TestRunAgentCloneNonDestructive covers manual-validation Caso 4: a second clone
+// over the same dest id reports the conflict and does not overwrite.
+func TestRunAgentCloneNonDestructive(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, _ := runAgentCmd("clone", "analyst", "analyst-custom", "--path", dir); code != 0 {
+		t.Fatalf("first clone failed")
+	}
+	prompt := filepath.Join(dir, ".daedalus", "agents", "analyst-custom", "prompt.md")
+	const marker = "MANUAL"
+	if err := os.WriteFile(prompt, []byte(marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runAgentCmd("clone", "analyst", "analyst-custom", "--path", dir)
+	if code != 0 {
+		t.Fatalf("second clone exit code = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "already exists") {
+		t.Errorf("stdout does not report the non-destructive conflict; got:\n%s", stdout)
+	}
+	if b, _ := os.ReadFile(prompt); string(b) != marker {
+		t.Errorf("second clone overwrote the manual edit: %q", b)
+	}
+}
+
+// TestRunAgentClonePreviewWritesNothing covers the dry-run path for clone.
+func TestRunAgentClonePreviewWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	code, stdout, stderr := runAgentCmd("clone", "analyst", "analyst-custom", "--path", dir, "--preview")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Preview") {
+		t.Errorf("stdout is not a preview; got:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".daedalus", "agents", "analyst-custom")); !os.IsNotExist(err) {
+		t.Errorf("preview wrote files (stat err=%v), want none", err)
+	}
+}
+
+// TestRunAgentCloneArgErrors covers the positional-arg and id validation guards.
+func TestRunAgentCloneArgErrors(t *testing.T) {
+	dir := t.TempDir()
+	// Missing dest id.
+	if code, _, _ := runAgentCmd("clone", "analyst", "--path", dir); code != 2 {
+		t.Errorf("exit code = %d for clone with one id, want 2", code)
+	}
+	// Non-kebab dest id.
+	if code, _, _ := runAgentCmd("clone", "analyst", "Bad_Id", "--path", dir); code != 2 {
+		t.Errorf("exit code = %d for non-kebab dest, want 2", code)
+	}
+	// Unknown source.
+	if code, _, _ := runAgentCmd("clone", "ghost", "dest-id", "--path", dir); code != 2 {
+		t.Errorf("exit code = %d for unknown source, want 2", code)
+	}
+}
+
+// TestRunAgentEditUnknownAgent covers editing an agent absent from the workspace.
+func TestRunAgentEditUnknownAgent(t *testing.T) {
+	dir := t.TempDir()
+	code, _, stderr := runAgentCmd("edit", "ghost", "--path", dir, "--role", "x")
+	if code != 2 {
+		t.Errorf("exit code = %d for editing an absent agent, want 2", code)
+	}
+	if !strings.Contains(stderr, "ghost") {
+		t.Errorf("stderr does not name the absent agent; got:\n%s", stderr)
+	}
+}
+
 // TestRunInitMultiBackendInputShape covers R6: the --backend flag accepts a
 // comma-separated list (the multi-backend shape) and records the selection. The
 // MVP set is a single backend, so a repeated claude-code collapses to one entry,

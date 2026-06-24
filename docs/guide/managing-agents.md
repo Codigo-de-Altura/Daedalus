@@ -158,13 +158,193 @@ or the parameters as your project needs. The output is **deterministic** — add
 the same agent into a clean workspace always produces the same files, byte for
 byte, which keeps Git diffs clean.
 
+## Cloning an agent
+
+`daedalus agent add` materializes a catalog agent under its own id. When you want
+to start from a catalog agent but keep your own customized copy under a different
+name, use `daedalus agent clone <source-id> <dest-id>`. The clone is an
+**independent** copy: editing it never changes the original built-in agent.
+
+```sh
+daedalus agent clone analyst analyst-custom
+```
+
+The destination id must be `kebab-case`. On success, Daedalus reports the new
+directory and how many files it created:
+
+```
+Materialized agent "analyst-custom" at .daedalus/agents/analyst-custom (created 2 files).
+```
+
+The ids may appear before or after the flags. See all options with:
+
+```sh
+daedalus agent clone --help
+```
+
+### Options
+
+| Option | Description |
+|---|---|
+| `--path <dir>` | Target repository directory whose `.daedalus/agents/` the clone is written to. Defaults to the current directory. |
+| `--preview` | Dry run: show the files that would be created without writing anything. |
+| `--help` | Show all available options. |
+
+### It will not overwrite an existing clone
+
+Cloning is **non-destructive**. If the destination id already exists in the
+workspace, Daedalus leaves the existing files untouched and tells you nothing was
+overwritten:
+
+```
+Agent "analyst-custom" already exists at .daedalus/agents/analyst-custom — not overwritten (skipped 2 files).
+```
+
+### Previewing a clone without writing
+
+Use `--preview` to perform a **dry run** that prints the files it would create
+but **writes nothing**:
+
+```sh
+daedalus agent clone analyst analyst-custom --preview
+```
+
+```
+Preview of materializing agent "analyst-custom" into .daedalus/agents/analyst-custom:
+  + analyst-custom/agent.yaml (file)
+  + analyst-custom/prompt.md (file)
+```
+
+### Unknown source or invalid destination
+
+If the source id is not in the catalog, Daedalus rejects the run, exits with
+status code `2`, and points you to `agent list`:
+
+```sh
+daedalus agent clone bogus my-agent
+```
+
+```
+daedalus: agent not found in catalog: "bogus"
+run 'daedalus agent list' to see the available agents
+```
+
+If the destination id is not valid `kebab-case`, the run is rejected with status
+code `2` and writes nothing:
+
+```sh
+daedalus agent clone analyst Bad_Id
+```
+
+```
+daedalus: destination agent id "Bad_Id" is not valid kebab-case
+```
+
+## Editing an agent
+
+Once an agent exists in your workspace — whether you added it or cloned it — you
+can change its role, prompt, and parameters with `daedalus agent edit <id>`.
+Edits are written directly to the agent's `agent.yaml` and `prompt.md`. You can,
+of course, also edit those files by hand; this command is the scriptable
+alternative.
+
+```sh
+daedalus agent edit analyst-custom --role "Drafts product specs for the mobile team"
+```
+
+On success, Daedalus confirms the change:
+
+```
+Edited agent "analyst-custom" at .daedalus/agents/analyst-custom.
+```
+
+The id may appear before or after the flags. See all options with:
+
+```sh
+daedalus agent edit --help
+```
+
+### Options
+
+At least one edit flag is required.
+
+| Option | Description |
+|---|---|
+| `--path <dir>` | Target repository directory whose `.daedalus/agents/` holds the agent. Defaults to the current directory. |
+| `--role <text>` | Set the agent's role/description. |
+| `--prompt <text>` | Set the agent's prompt inline. |
+| `--prompt-file <path>` | Set the agent's prompt from a file. Takes precedence over `--prompt` if both are given. |
+| `--set-param key=value` | Add or update a parameter. **Repeatable.** |
+| `--remove-param key` | Remove a parameter by key. **Repeatable.** |
+| `--help` | Show all available options. |
+
+You can combine several flags in one run. For example, set the prompt from a
+file, add a parameter, and drop another:
+
+```sh
+daedalus agent edit analyst-custom \
+  --prompt-file ./prompts/analyst.md \
+  --set-param temperature=0.2 \
+  --remove-param model
+```
+
+Parameters set through the CLI are stored as **strings** — Daedalus does not
+infer number or boolean types from the value you type. (Typed parameters that
+came from the built-in catalog keep their type until you edit them via the CLI.)
+
+### Edits are validated before anything is written
+
+An edit is checked **before** it touches disk, and the write is **atomic**. If
+the result would be invalid — for example, an empty role — Daedalus rejects the
+edit with status code `2` and leaves your existing definition completely intact
+(never half-written):
+
+```sh
+daedalus agent edit analyst-custom --role ""
+```
+
+```
+daedalus: invalid edit to agent "analyst-custom": agent "analyst-custom" has an empty role
+```
+
+### Editing requires at least one change
+
+Running `edit` with no edit flag is treated as a usage error (status code `2`),
+not as a silent no-op:
+
+```sh
+daedalus agent edit analyst-custom
+```
+
+```
+daedalus: agent edit requires at least one edit flag (--role, --prompt, --prompt-file, --set-param, --remove-param)
+```
+
+### Editing an agent that does not exist
+
+`edit` only works on an agent that already lives in your workspace. If the id is
+not there, Daedalus rejects the run with status code `2` and tells you to create
+it first:
+
+```sh
+daedalus agent edit ghost --role "anything"
+```
+
+```
+daedalus: agent not found in catalog: "ghost"
+the agent must already exist in the workspace; clone or add it first
+```
+
 ## Notes & limitations
 
 - The catalog ships **embedded in the binary**. A remote catalog or marketplace
   is out of scope for Phase 1.
-- Adding an agent is **non-destructive**: existing definitions and your manual
-  edits are never overwritten.
+- Adding and cloning an agent are **non-destructive**: existing definitions and
+  your manual edits are never overwritten.
+- A clone is **independent** of the built-in agent it came from — editing the
+  clone never changes the original.
 - Phase 1 **configures** your project's AI structure; it does not **execute**
   agents — that stays with your runtime (for example, Claude Code).
-- Validating agent definitions against the canonical schema is covered by a
-  later feature; today the built-in agents are already valid by construction.
+- Edits are checked structurally before writing, but full validation against the
+  canonical schema is covered by a later feature; until then, an edit that keeps
+  the role, prompt, and parameters well-formed is accepted.
