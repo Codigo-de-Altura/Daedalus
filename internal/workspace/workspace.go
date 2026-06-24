@@ -3,10 +3,10 @@
 // project's AI structure (agents, prompts, workflows, SDD backlog).
 //
 // This package owns the *scaffolding* of the workspace: the deterministic
-// directory tree and the root artifact files. The deterministic *content* of
-// those artifacts (daedalus.yaml, init.md) belongs to a later ticket; here they
-// are created empty when missing so the structure is complete. All operations
-// are non-destructive: existing files are never truncated or removed.
+// directory tree and the root artifact files, including their deterministic
+// *content* (the daedalus.yaml manifest and the base init.md, see content.go).
+// All operations are non-destructive: existing files are never truncated or
+// removed, so manually edited artifacts survive a re-run untouched.
 //
 // Detection is separated from writing. Plan inspects a target and computes what
 // the canonical structure is missing without touching the filesystem, so a
@@ -41,9 +41,10 @@ var Subdirs = []string{
 	".state",
 }
 
-// RootArtifacts are the files placed at the root of the workspace. Their
-// deterministic content is produced by a later ticket; this package only
-// guarantees their existence as part of the scaffolding.
+// RootArtifacts are the files placed at the root of the workspace, in fixed
+// deterministic order. Their content is generated deterministically from the
+// target (see content.go / artifactContent); this package guarantees both their
+// existence and their initial content as part of the scaffolding.
 var RootArtifacts = []string{
 	"daedalus.yaml",
 	"init.md",
@@ -60,6 +61,11 @@ type Plan struct {
 	Root string
 	// Path is the workspace path (`<root>/.daedalus`).
 	Path string
+	// ProjectName is the deterministic project name derived from Root (the base
+	// name of its absolute path). It is the input to the manifest/init.md content
+	// generators, captured at detection time so Apply renders the same content a
+	// preview would describe.
+	ProjectName string
 	// WorkspaceExisted is true when the workspace directory was already present
 	// at detection time. It is the signal that distinguishes a from-scratch
 	// creation from an upgrade over an existing workspace.
@@ -106,7 +112,7 @@ type Result struct {
 // it would require a destructive overwrite.
 func Detect(root string) (*Plan, error) {
 	wsPath := filepath.Join(root, Name)
-	p := &Plan{Root: root, Path: wsPath}
+	p := &Plan{Root: root, Path: wsPath, ProjectName: deriveProjectName(root)}
 
 	switch info, err := os.Stat(wsPath); {
 	case err == nil:
@@ -163,9 +169,12 @@ func (p *Plan) Apply() (*Result, error) {
 	}
 
 	for _, name := range p.MissingFiles {
+		// Generate deterministic content for the artifact; unknown artifacts fall
+		// back to empty so adding a new root file never silently breaks.
+		content, _ := artifactContent(name, p.ProjectName)
 		// O_EXCL guards against a TOCTOU race: if the file appeared between Detect
 		// and Apply we skip it rather than truncate, staying non-destructive.
-		created, err := ensureFile(filepath.Join(p.Path, name))
+		created, err := ensureFile(filepath.Join(p.Path, name), content)
 		if err != nil {
 			return nil, err
 		}
@@ -229,10 +238,12 @@ func fileExists(path string) (bool, error) {
 	}
 }
 
-// ensureFile creates an empty file at path only if it does not already exist.
-// It never truncates an existing file (non-destructive) and reports whether it
-// created a new one.
-func ensureFile(path string) (bool, error) {
+// ensureFile creates a file at path with the given deterministic content only if
+// it does not already exist. O_EXCL makes the create-or-skip decision atomic and
+// non-destructive: an existing file is never truncated or overwritten, so manual
+// edits survive a re-run untouched. It reports whether it created a new file
+// (created=false when the path already existed).
+func ensureFile(path, content string) (bool, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
@@ -240,5 +251,18 @@ func ensureFile(path string) (bool, error) {
 		}
 		return false, err
 	}
-	return true, f.Close()
+	// Write the content, then close. We must not defer Close here: a deferred
+	// Close would mask a Write error and we would lose the close error on the
+	// happy path. Write first, capture its error, then close and surface
+	// whichever error occurred (Write takes precedence, since a failed Write
+	// leaves the file in a bad state regardless of how Close goes).
+	_, writeErr := f.WriteString(content)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return false, writeErr
+	}
+	if closeErr != nil {
+		return false, closeErr
+	}
+	return true, nil
 }

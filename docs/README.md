@@ -17,8 +17,8 @@ index below.
 
 ### User guide
 - [Command line](guide/command-line.md) — running Daedalus, the interface, version, and help.
-- [Initializing a workspace](guide/initializing-a-workspace.md) — `daedalus init` and the `.daedalus/` workspace.
-- [Configuration](guide/configuration.md) — environment variables and logging.
+- [Initializing a workspace](guide/initializing-a-workspace.md) — `daedalus init`, the `.daedalus/` workspace, and its root artifacts.
+- [Configuration](guide/configuration.md) — the workspace manifest, environment variables, and logging.
 
 ### Contributing
 - [Development environment](contributing/development-environment.md) — Make targets, Docker, and Compose.

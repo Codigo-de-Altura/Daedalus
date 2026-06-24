@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -298,6 +299,162 @@ func TestApplyPreservesManualEdit(t *testing.T) {
 
 	if b, _ := os.ReadFile(initMD); string(b) != marker {
 		t.Errorf("manual edit to init.md was lost: %q", b)
+	}
+}
+
+// rootYAMLKeys extracts the top-level keys of a small, hand-rendered YAML
+// document in document order. It deliberately avoids a YAML dependency
+// (stdlib-first; go.mod has none): the manifest is a fixed, flat-at-the-root
+// shape, so a top-level key is any line that starts in column 0 (no leading
+// whitespace), is not a comment, and contains a ':'. Nested block entries are
+// indented and list items start with '-', so both are skipped.
+func rootYAMLKeys(t *testing.T, yaml string) []string {
+	t.Helper()
+	var keys []string
+	for _, line := range strings.Split(yaml, "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Indented lines are children of a block (e.g. conventions entries) and
+		// list items belong to a sequence (e.g. backends); neither is a root key.
+		if line[0] == ' ' || line[0] == '\t' || strings.HasPrefix(line, "-") {
+			continue
+		}
+		key, _, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		keys = append(keys, strings.TrimSpace(key))
+	}
+	return keys
+}
+
+// fixedNameRoot creates a subdirectory with a fixed name inside a fresh TempDir
+// and returns it. deriveProjectName derives the project name from the basename
+// of the root, so two distinct t.TempDir() paths would otherwise yield different
+// project names (and different content). Nesting a fixed-name directory under
+// each TempDir forces both runs to share the same derived project name, which is
+// what lets us assert byte-for-byte determinism across two independent roots.
+func fixedNameRoot(t *testing.T, name string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// TestManifestHasRequiredContent covers CA1/CA5: after Create, daedalus.yaml
+// holds the required root keys and the backends list includes the MVP default.
+func TestManifestHasRequiredContent(t *testing.T) {
+	root := fixedNameRoot(t, "demo-project")
+
+	if _, err := Create(root); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, Name, "daedalus.yaml"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	manifest := string(b)
+
+	// CA1: the four required root keys are present.
+	keys := rootYAMLKeys(t, manifest)
+	for _, want := range []string{"name", "version", "backends", "conventions"} {
+		found := false
+		for _, k := range keys {
+			if k == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("manifest missing required root key %q; got keys %v", want, keys)
+		}
+	}
+
+	// name is derived from the (fixed) root basename, so it is deterministic.
+	if !strings.Contains(manifest, "name: demo-project") {
+		t.Errorf("manifest does not carry the derived project name; got:\n%s", manifest)
+	}
+
+	// CA5: the backends list ships the MVP default (claude-code).
+	if !strings.Contains(manifest, DefaultBackend) {
+		t.Errorf("manifest backends missing MVP default %q; got:\n%s", DefaultBackend, manifest)
+	}
+}
+
+// TestInitMDHasStructureAndConventions covers CA2: init.md carries the
+// `.daedalus/` structure map and a conventions section.
+func TestInitMDHasStructureAndConventions(t *testing.T) {
+	root := fixedNameRoot(t, "demo-project")
+
+	if _, err := Create(root); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, Name, "init.md"))
+	if err != nil {
+		t.Fatalf("read init.md: %v", err)
+	}
+	initMD := string(b)
+
+	// The structure map must enumerate the workspace layout: the root dir line
+	// plus every canonical subdir, so the documented map cannot drift from what
+	// the scaffolding creates.
+	if !strings.Contains(initMD, ".daedalus/") {
+		t.Errorf("init.md missing the .daedalus/ structure map; got:\n%s", initMD)
+	}
+	for _, sub := range Subdirs {
+		if !strings.Contains(initMD, sub+"/") {
+			t.Errorf("init.md structure map missing subdir %q", sub)
+		}
+	}
+	// A conventions section must be present (case-insensitive to tolerate heading
+	// vs. inline phrasing without coupling the test to exact wording).
+	if !strings.Contains(strings.ToLower(initMD), "conventions") {
+		t.Errorf("init.md missing a conventions section; got:\n%s", initMD)
+	}
+}
+
+// TestArtifactContentIsByteForByteDeterministic covers CA3/CA4: generating the
+// artifacts twice over two independent roots that share the same derived project
+// name yields byte-identical daedalus.yaml and init.md, and the manifest's root
+// key order is identical across runs.
+func TestArtifactContentIsByteForByteDeterministic(t *testing.T) {
+	// Same fixed name under two distinct TempDirs => same derived project name
+	// => the content generators receive identical input on both runs.
+	generate := func() (manifest, initMD []byte) {
+		root := fixedNameRoot(t, "fixed-name")
+		if _, err := Create(root); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		m, err := os.ReadFile(filepath.Join(root, Name, "daedalus.yaml"))
+		if err != nil {
+			t.Fatalf("read manifest: %v", err)
+		}
+		i, err := os.ReadFile(filepath.Join(root, Name, "init.md"))
+		if err != nil {
+			t.Fatalf("read init.md: %v", err)
+		}
+		return m, i
+	}
+
+	manifest1, initMD1 := generate()
+	manifest2, initMD2 := generate()
+
+	// CA3: byte-for-byte equality of both artifacts across runs.
+	if string(manifest1) != string(manifest2) {
+		t.Errorf("daedalus.yaml not deterministic:\n--- run 1 ---\n%s\n--- run 2 ---\n%s", manifest1, manifest2)
+	}
+	if string(initMD1) != string(initMD2) {
+		t.Errorf("init.md not deterministic:\n--- run 1 ---\n%s\n--- run 2 ---\n%s", initMD1, initMD2)
+	}
+
+	// CA4: the root key order is identical and stable between runs.
+	keys1 := rootYAMLKeys(t, string(manifest1))
+	keys2 := rootYAMLKeys(t, string(manifest2))
+	if !equal(keys1, keys2) {
+		t.Errorf("manifest key order not stable across runs: %v vs %v", keys1, keys2)
 	}
 }
 
