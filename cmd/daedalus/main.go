@@ -25,6 +25,7 @@ import (
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
 	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
 	"github.com/Codigo-de-Altura/Daedalus/internal/tui"
+	"github.com/Codigo-de-Altura/Daedalus/internal/workflows"
 	"github.com/Codigo-de-Altura/Daedalus/internal/workspace"
 )
 
@@ -44,6 +45,8 @@ func run(args []string) int {
 			return runAgent(args[1:], os.Stdout, os.Stderr)
 		case "prompt":
 			return runPrompt(args[1:], os.Stdout, os.Stderr)
+		case "workflow":
+			return runWorkflow(args[1:], os.Stdout, os.Stderr)
 		default:
 			fmt.Fprintf(os.Stderr, "daedalus: unknown command %q\nrun 'daedalus --help' for usage\n", args[0])
 			return 2
@@ -1272,6 +1275,537 @@ func writePromptSchemaErrors(w io.Writer, err error) {
 	}
 }
 
+// runWorkflow handles the `daedalus workflow` subcommand, a thin CLI surface over
+// the workflows domain (internal/workflows). It dispatches to the operation named
+// by the next argument so the verb set can grow without reshaping run(): list,
+// create, show, remove, plus the phase edit operations add-phase/edit-phase/
+// remove-phase. It keeps the same conventions as runPrompt — own usage, exit code
+// 2 for usage errors, logging to stderr — so the CLI feels uniform.
+func runWorkflow(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, workflowUsage)
+		return 2
+	}
+
+	switch args[0] {
+	case "list":
+		return runWorkflowList(args[1:], stdout, stderr)
+	case "create":
+		return runWorkflowCreate(args[1:], stdout, stderr)
+	case "show":
+		return runWorkflowShow(args[1:], stdout, stderr)
+	case "remove":
+		return runWorkflowRemove(args[1:], stdout, stderr)
+	case "add-phase":
+		return runWorkflowAddPhase(args[1:], stdout, stderr)
+	case "edit-phase":
+		return runWorkflowEditPhase(args[1:], stdout, stderr)
+	case "remove-phase":
+		return runWorkflowRemovePhase(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown workflow operation %q\n\n%s", args[0], workflowUsage)
+		return 2
+	}
+}
+
+// workflowUsage is the shared help text for the `workflow` subcommand, surfaced
+// when no operation (or an unknown one) is given.
+const workflowUsage = "Usage: daedalus workflow <operation> [flags]\n\n" +
+	"Work with DAG workflows in .daedalus/workflows/.\n\n" +
+	"Operations:\n" +
+	"  list                          list persisted workflows (name, phase count)\n" +
+	"  create <name>                 create a new (empty) workflow as <name>.yaml\n" +
+	"  show <name>                   print a workflow's file content verbatim (raw)\n" +
+	"  remove <name>                 delete a workflow's file\n" +
+	"  add-phase <name> --id <id> --agent <a> --gate <g> [flags]   append a phase\n" +
+	"  edit-phase <name> --id <id> [flags]                         edit a phase\n" +
+	"  remove-phase <name> --id <id>                               remove a phase\n\n" +
+	"Run 'daedalus workflow <operation> --help' for an operation's flags.\n"
+
+// workflowsRootFor builds the canonical `.daedalus/workflows/` directory under dir
+// so a workflow lands exactly where init scaffolds the workflows/ directory. Built
+// here rather than in the workflows package so that package stays free of the
+// workspace-location convention (mirrors how promptsRootFor is derived).
+func workflowsRootFor(dir string) string {
+	return filepath.Join(dir, workspace.Name, workflows.WorkflowsDir)
+}
+
+// runWorkflowList handles `daedalus workflow list`: it prints the persisted
+// workflows (name, phase count) in deterministic, name-sorted order.
+func runWorkflowList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus workflow list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/workflows/ is listed")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus workflow list [--path .]\n\n"+
+			"List the persisted workflows (name, phase count).\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	entries, err := workflows.List(workflowsRootFor(*dir))
+	if err != nil {
+		logger.Error("workflow list failed", "phase", "list", "err", err)
+		fmt.Fprintf(stderr, "daedalus: workflow list failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("workflows listed", "workflows", len(entries))
+	fmt.Fprintf(stdout, "Workflows (%d):\n", len(entries))
+	for _, e := range entries {
+		fmt.Fprintf(stdout, "  %s\t%d phase%s\n", e.Name, e.Phases, plural(e.Phases, "", "s"))
+	}
+	return 0
+}
+
+// runWorkflowCreate handles `daedalus workflow create <name>`: it creates a new,
+// empty workflow under .daedalus/workflows/ as <name>.yaml. The name is validated
+// before any write. It is non-destructive — a duplicate name is reported as a
+// conflict, not overwritten (R4) — and --preview reports the file that would be
+// created without writing anything. Phases are added afterwards with add-phase.
+func runWorkflowCreate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus workflow create", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/workflows/ the workflow is added to")
+	preview := fs.Bool("preview", false, "show the file that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus workflow create <name> [flags]\n\n"+
+			"Create a new, empty workflow in the target workspace's .daedalus/workflows/\n"+
+			"directory as <name>.yaml. If the workflow already exists it is not\n"+
+			"overwritten. Add phases with 'daedalus workflow add-phase'.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	name, flags, err := splitWorkflowName(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	workflowsRoot := workflowsRootFor(*dir)
+
+	// Plan first: validates the name and renders the content without touching the
+	// filesystem, so an invalid name fails as a usage error before any write.
+	plan, err := workflows.PlanCreate(workflowsRoot, workflows.Workflow{Name: name})
+	if err != nil {
+		logger.Error("workflow create rejected", "phase", "plan", "name", name, "err", err)
+		if isWorkflowInvalid(err) {
+			fmt.Fprintf(stderr, "daedalus: workflow %q is invalid; it was not created:\n", name)
+			writeWorkflowSchemaErrors(stderr, err)
+		} else {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		}
+		return 2
+	}
+
+	logger.Info("workflow create planned", "name", plan.Workflow.Name, "path", plan.Path)
+
+	if *preview {
+		fmt.Fprintf(stdout, "Preview of creating workflow %q at %s:\n",
+			plan.Workflow.Name, filepath.ToSlash(plan.Path))
+		fmt.Fprint(stdout, plan.Content)
+		logger.Info("workflow create preview only", "name", plan.Workflow.Name, "applied", false)
+		return 0
+	}
+
+	if err := plan.Apply(); err != nil {
+		if errors.Is(err, workflows.ErrWorkflowExists) {
+			logger.Error("workflow create rejected", "phase", "apply", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v — not overwritten\n", err)
+			return 2
+		}
+		logger.Error("workflow create failed", "phase", "apply", "name", name, "err", err)
+		fmt.Fprintf(stderr, "daedalus: workflow create failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("workflow created", "name", plan.Workflow.Name)
+	fmt.Fprintf(stdout, "Created workflow %q at %s.\n",
+		plan.Workflow.Name, filepath.ToSlash(plan.Path))
+	return 0
+}
+
+// runWorkflowShow handles `daedalus workflow show <name>`: it prints the
+// workflow's file content verbatim to stdout, so the user sees exactly what is
+// persisted (the canonical YAML).
+func runWorkflowShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus workflow show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/workflows/ holds the workflow")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus workflow show <name> [--path .]\n\n"+
+			"Print the workflow's file content verbatim.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	name, flags, err := splitWorkflowName(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !workflows.IsKebabCase(name) {
+		fmt.Fprintf(stderr, "daedalus: workflow name %q is not valid kebab-case\n", name)
+		return 2
+	}
+
+	path := filepath.Join(workflowsRootFor(*dir), name+workflows.FileExt)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Error("workflow show rejected", "phase", "read", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: workflow %q not found\n", name)
+			return 2
+		}
+		logger.Error("workflow show failed", "phase", "read", "name", name, "err", err)
+		fmt.Fprintf(stderr, "daedalus: workflow show failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("workflow shown", "name", name)
+	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// runWorkflowRemove handles `daedalus workflow remove <name>`: it deletes the
+// workflow's file and nothing else. An absent workflow is an explicit error.
+func runWorkflowRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus workflow remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/workflows/ holds the workflow")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus workflow remove <name> [--path .]\n\n"+
+			"Delete a workflow's file from the workspace. Only that file is removed.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	name, flags, err := splitWorkflowName(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	workflowsRoot := workflowsRootFor(*dir)
+
+	if err := workflows.Remove(workflowsRoot, name); err != nil {
+		if errors.Is(err, workflows.ErrWorkflowNotFound) || !workflows.IsKebabCase(name) {
+			logger.Error("workflow remove rejected", "phase", "remove", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		}
+		logger.Error("workflow remove failed", "phase", "remove", "name", name, "err", err)
+		fmt.Fprintf(stderr, "daedalus: workflow remove failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("workflow removed", "name", name)
+	fmt.Fprintf(stdout, "Removed workflow %q from %s.\n",
+		name, filepath.ToSlash(filepath.Join(workflowsRoot, name+workflows.FileExt)))
+	return 0
+}
+
+// runWorkflowAddPhase handles `daedalus workflow add-phase <name> --id <id> ...`:
+// it appends a phase to an existing workflow. The edit is validated before any
+// write (the whole resulting workflow must stay structurally valid), so a bad
+// phase id or a missing required field is rejected with an actionable error and
+// the existing file is left intact (R4/R6). Writes are atomic.
+func runWorkflowAddPhase(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus workflow add-phase", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/workflows/ holds the workflow")
+	id := fs.String("id", "", "phase id (required, kebab-case)")
+	agent := fs.String("agent", "", "agent that runs the phase (required)")
+	gate := fs.String("gate", "", "validation gate for the phase (required)")
+	inputs := fs.String("inputs", "", "comma-separated input artifacts (optional)")
+	outputs := fs.String("outputs", "", "comma-separated output artifacts (optional)")
+	dependsOn := fs.String("depends-on", "", "comma-separated predecessor references / DAG edges (optional)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus workflow add-phase <name> --id <id> --agent <a> --gate <g> [flags]\n\n"+
+			"Append a phase to an existing workflow. id, agent and gate are required.\n"+
+			"List flags take comma-separated values (e.g. --inputs brief,spec). The edit\n"+
+			"is validated before writing; an invalid result is rejected and the existing\n"+
+			"file is left intact.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	name, flags, err := splitWorkflowName(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	phase := workflows.Phase{
+		ID:        *id,
+		Agent:     *agent,
+		Gate:      *gate,
+		Inputs:    splitList(*inputs),
+		Outputs:   splitList(*outputs),
+		DependsOn: splitList(*dependsOn),
+	}
+	return applyWorkflowEdit(stdout, stderr, *dir, name, "add-phase",
+		func(w *workflows.Workflow) error { return w.AddPhase(phase) })
+}
+
+// runWorkflowEditPhase handles `daedalus workflow edit-phase <name> --id <id> ...`:
+// it replaces the named phase's fields. Only the flags the user passes are
+// changed; the phase keeps its position. The whole resulting workflow is validated
+// before any write (R4/R6); writes are atomic. To rename a phase, pass --new-id.
+func runWorkflowEditPhase(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus workflow edit-phase", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/workflows/ holds the workflow")
+	id := fs.String("id", "", "id of the phase to edit (required)")
+	newID := fs.String("new-id", "", "rename the phase to this id (optional)")
+	agent := fs.String("agent", "", "set the phase's agent")
+	gate := fs.String("gate", "", "set the phase's gate")
+	inputs := fs.String("inputs", "", "set the phase's inputs (comma-separated; empty clears)")
+	outputs := fs.String("outputs", "", "set the phase's outputs (comma-separated; empty clears)")
+	dependsOn := fs.String("depends-on", "", "set the phase's depends_on (comma-separated; empty clears)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus workflow edit-phase <name> --id <id> [flags]\n\n"+
+			"Edit an existing phase in place, keeping its position. Only the flags you\n"+
+			"pass are changed; --new-id renames the phase. The edit is validated before\n"+
+			"writing; an invalid result is rejected and the existing file is left intact.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	name, flags, err := splitWorkflowName(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if strings.TrimSpace(*id) == "" {
+		fmt.Fprint(stderr, "daedalus: workflow edit-phase requires --id\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	// Learn which flags were actually set so an explicit empty value (e.g.
+	// --inputs "") is a deliberate clear rather than indistinguishable from absence.
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	mutate := func(w *workflows.Workflow) error {
+		idx := w.PhaseIndex(*id)
+		if idx < 0 {
+			return fmt.Errorf("%w: %q", workflows.ErrPhaseNotFound, *id)
+		}
+		// Start from the current phase and apply only the named changes, preserving
+		// the rest, so an edit is a focused field update rather than a full rewrite.
+		p := w.Phases[idx]
+		if set["new-id"] {
+			p.ID = *newID
+		}
+		if set["agent"] {
+			p.Agent = *agent
+		}
+		if set["gate"] {
+			p.Gate = *gate
+		}
+		if set["inputs"] {
+			p.Inputs = splitList(*inputs)
+		}
+		if set["outputs"] {
+			p.Outputs = splitList(*outputs)
+		}
+		if set["depends-on"] {
+			p.DependsOn = splitList(*dependsOn)
+		}
+		return w.EditPhase(*id, p)
+	}
+	return applyWorkflowEdit(stdout, stderr, *dir, name, "edit-phase", mutate)
+}
+
+// runWorkflowRemovePhase handles `daedalus workflow remove-phase <name> --id <id>`:
+// it deletes the named phase, preserving the order of the rest. The resulting
+// workflow is validated before any write; writes are atomic.
+func runWorkflowRemovePhase(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus workflow remove-phase", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/workflows/ holds the workflow")
+	id := fs.String("id", "", "id of the phase to remove (required)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus workflow remove-phase <name> --id <id> [--path .]\n\n"+
+			"Remove a phase from a workflow, preserving the order of the rest.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	name, flags, err := splitWorkflowName(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if strings.TrimSpace(*id) == "" {
+		fmt.Fprint(stderr, "daedalus: workflow remove-phase requires --id\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	return applyWorkflowEdit(stdout, stderr, *dir, name, "remove-phase",
+		func(w *workflows.Workflow) error { return w.RemovePhase(*id) })
+}
+
+// applyWorkflowEdit is the shared tail of the phase edit operations: it runs the
+// persisted workflows.Edit cycle (load → mutate → validate → atomic write) and
+// maps the possible outcomes to consistent messages and exit codes. A not-found
+// workflow or phase, a malformed file, and a schema-invalid result are all usage
+// errors (exit 2); a genuine I/O failure is exit 1. This keeps the per-operation
+// handlers focused on building their mutation.
+func applyWorkflowEdit(stdout, stderr io.Writer, dir, name, op string, mutate workflows.EditFunc) int {
+	logger := logging.New(stderr)
+
+	if !workflows.IsKebabCase(name) {
+		fmt.Fprintf(stderr, "daedalus: workflow name %q is not valid kebab-case\n", name)
+		return 2
+	}
+
+	workflowsRoot := workflowsRootFor(dir)
+	edited, err := workflows.Edit(workflowsRoot, name, mutate)
+	if err != nil {
+		switch {
+		case errors.Is(err, workflows.ErrWorkflowNotFound):
+			logger.Error("workflow "+op+" rejected", "phase", "load", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			fmt.Fprint(stderr, "the workflow must already exist; create it first\n")
+			return 2
+		case errors.Is(err, workflows.ErrPhaseNotFound), errors.Is(err, workflows.ErrPhaseExists):
+			logger.Error("workflow "+op+" rejected", "phase", "mutate", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		case errors.Is(err, workflows.ErrMalformedWorkflow):
+			logger.Error("workflow "+op+" failed", "phase", "load", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 1
+		case isWorkflowInvalid(err):
+			logger.Error("workflow "+op+" rejected", "phase", "validate", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: workflow %q is invalid; the edit was not applied:\n", name)
+			writeWorkflowSchemaErrors(stderr, err)
+			return 2
+		default:
+			logger.Error("workflow "+op+" failed", "phase", "write", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: workflow %s failed: %v\n", op, err)
+			return 1
+		}
+	}
+
+	logger.Info("workflow "+op+" applied", "name", edited.Name, "phases", len(edited.Phases))
+	fmt.Fprintf(stdout, "Applied %s to workflow %q at %s (%d phase%s).\n",
+		op, edited.Name, filepath.ToSlash(filepath.Join(workflowsRoot, name+workflows.FileExt)),
+		len(edited.Phases), plural(len(edited.Phases), "", "s"))
+	return 0
+}
+
+// splitWorkflowName extracts the single positional workflow name from an argument
+// list, returning it plus the remaining (flag) tokens. It mirrors splitPromptID
+// but names a "workflow name" in its errors so the `workflow` subcommand's usage
+// messages read correctly. Exactly one positional is required; a `--help`/`-h`
+// token is allowed without a name so the caller's parser can show usage.
+func splitWorkflowName(args []string) (name string, flags []string, err error) {
+	positionals, flags := splitPositionals(args)
+	for _, f := range flags {
+		if f == "-h" || f == "--help" {
+			return "", flags, nil
+		}
+	}
+	switch len(positionals) {
+	case 1:
+		return positionals[0], flags, nil
+	case 0:
+		return "", flags, errors.New("this operation requires exactly one workflow name")
+	default:
+		return "", flags, fmt.Errorf("this operation requires exactly one workflow name, got %d", len(positionals))
+	}
+}
+
+// splitList turns a comma-separated flag value into a slice of trimmed,
+// non-empty entries, mirroring splitBackends. An empty value yields a nil slice,
+// which the renderer serializes as an empty list `[]`. Blank entries (e.g. a
+// trailing comma) are dropped so they never reach the model as an empty artifact
+// reference.
+func splitList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// isWorkflowInvalid reports whether err is (or wraps) a *workflows.ValidationError
+// — the rich error the workflows flows return from their pre-write gates — so the
+// CLI detects it structurally with errors.As rather than matching a message prefix.
+func isWorkflowInvalid(err error) bool {
+	var ve *workflows.ValidationError
+	return errors.As(err, &ve)
+}
+
+// writeWorkflowSchemaErrors renders a workflow validation failure as actionable
+// lines, one finding per line, so the user can fix every problem in one pass (R7).
+// It falls back to the plain error text if err is not a *workflows.ValidationError,
+// so it is safe to call on any error.
+func writeWorkflowSchemaErrors(w io.Writer, err error) {
+	var ve *workflows.ValidationError
+	if !errors.As(err, &ve) {
+		fmt.Fprintf(w, "  - %v\n", err)
+		return
+	}
+	for _, se := range ve.Errors {
+		fmt.Fprintf(w, "  - %s\n", se.Error())
+	}
+}
+
 // writePreview renders, on stdout, the directories and root artifacts a plan
 // would create. It lists nothing for an already-complete workspace so an
 // idempotent re-run produces an explicit "nothing to update" preview.
@@ -1353,6 +1887,17 @@ var valueFlags = map[string]struct{}{
 	"-description": {}, "--description": {},
 	"-body": {}, "--body": {},
 	"-body-file": {}, "--body-file": {},
+	// workflow-subcommand value flags (phase edit operations). Listed here too
+	// because the workflow subcommand shares splitPositionals; over-listing is
+	// harmless since a flag a given operation does not define simply never appears
+	// in its args.
+	"-id": {}, "--id": {},
+	"-new-id": {}, "--new-id": {},
+	"-agent": {}, "--agent": {},
+	"-inputs": {}, "--inputs": {},
+	"-outputs": {}, "--outputs": {},
+	"-gate": {}, "--gate": {},
+	"-depends-on": {}, "--depends-on": {},
 }
 
 // splitPositionals separates the positional tokens from the flag tokens in an
