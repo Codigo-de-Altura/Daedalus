@@ -193,6 +193,8 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		return runAgentClone(args[1:], stdout, stderr)
 	case "edit":
 		return runAgentEdit(args[1:], stdout, stderr)
+	case "import":
+		return runAgentImport(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "daedalus: unknown agent operation %q\n\n%s", args[0], agentUsage)
 		return 2
@@ -207,7 +209,8 @@ const agentUsage = "Usage: daedalus agent <operation> [flags]\n\n" +
 	"  list                       list the built-in catalog agents (id and role)\n" +
 	"  add <id>                   materialize a catalog agent into .daedalus/agents/\n" +
 	"  clone <src> <dest>         copy a built-in agent to a new id you can edit\n" +
-	"  edit <id> [flags]          edit a workspace agent's role, prompt or parameters\n\n" +
+	"  edit <id> [flags]          edit a workspace agent's role, prompt or parameters\n" +
+	"  import <path>              import agent(s) from a local file or directory\n\n" +
 	"Run 'daedalus agent <operation> --help' for an operation's flags.\n"
 
 // runAgentList handles `daedalus agent list`: it prints the built-in agents
@@ -578,6 +581,142 @@ func buildEditSpec(fs *flag.FlagSet, role, prompt, promptFile string, setParams,
 // richer schema-error type the CLI can then switch on.
 func isInvalidEdit(err error) bool {
 	return strings.Contains(err.Error(), "invalid edit to agent")
+}
+
+// runAgentImport handles `daedalus agent import <path>`: it imports agent(s) from
+// a local file or directory into the workspace's .daedalus/agents/, converting
+// Claude Code (frontmatter) and canonical sources to canonical definitions. It is
+// non-destructive — an id that already exists is reported as a conflict, not
+// overwritten (R5/CA4) — and --preview reports what would be imported without
+// writing. A directory import reports each agent independently and a final
+// summary; one invalid source does not abort the valid ones (the failures are
+// reported, the rest are imported).
+//
+// Exit code reflects the worst per-agent outcome: 0 when every source imported (or
+// was a non-destructive skip), 2 when any source failed to parse/normalize/
+// validate (an actionable user error), 1 on a genuine I/O failure.
+func runAgentImport(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus agent import", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/agents/ receives the import")
+	preview := fs.Bool("preview", false, "show what would be imported without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus agent import <source> [flags]\n\n"+
+			"Import agent(s) from a local file or directory into the target workspace's\n"+
+			".daedalus/agents/ directory, converting Claude Code (.claude/agents/*.md)\n"+
+			"and canonical definitions to the canonical agnostic format. A directory is\n"+
+			"scanned shallowly (each file is a candidate). Existing agents are not\n"+
+			"overwritten; invalid sources are reported and skipped.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	// One positional source path among the flags; split it out so it can sit before
+	// or after the flags (Go's parser stops at the first non-flag token otherwise).
+	positionals, flags := splitPositionals(args)
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if len(positionals) != 1 {
+		fmt.Fprint(stderr, "daedalus: agent import requires exactly one source path\n\n")
+		fs.Usage()
+		return 2
+	}
+	source := positionals[0]
+
+	logger := logging.New(stderr)
+	agentsRoot := filepath.Join(*dir, workspace.Name, catalog.AgentsDir)
+
+	// Plan first: scans and converts every source without writing, so an invalid
+	// source is detected before any filesystem change and --preview is honest.
+	plan, err := catalog.ImportPlanFor(agentsRoot, source)
+	if err != nil {
+		// Stat/read failure on the source path itself (not a per-agent error).
+		logger.Error("agent import failed", "phase", "scan", "source", source, "err", err)
+		fmt.Fprintf(stderr, "daedalus: agent import failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("agent import planned",
+		"source", source, "importable", len(plan.Agents), "errors", len(plan.Errors))
+
+	if *preview {
+		writeImportPreview(stdout, plan)
+		// A preview still surfaces parse/validation errors so the user can fix them
+		// before a real run; those make the preview exit non-zero (usage error).
+		if len(plan.Errors) > 0 {
+			writeImportErrors(stdout, plan.Errors)
+			return 2
+		}
+		return 0
+	}
+
+	outcomes, err := plan.Apply()
+	if err != nil {
+		logger.Error("agent import failed", "phase", "apply", "source", source, "err", err)
+		fmt.Fprintf(stderr, "daedalus: agent import failed: %v\n", err)
+		return 1
+	}
+
+	code := writeImportResult(stdout, stderr, outcomes)
+	logger.Info("agent import done", "outcomes", len(outcomes), "exit", code)
+	return code
+}
+
+// writeImportPreview reports, on stdout, the agents an import would create.
+func writeImportPreview(stdout io.Writer, plan *catalog.ImportPlan) {
+	if len(plan.Agents) == 0 {
+		fmt.Fprintln(stdout, "Preview: no importable agents found.")
+		return
+	}
+	fmt.Fprintf(stdout, "Preview of importing %d agent(s):\n", len(plan.Agents))
+	for _, mp := range plan.Agents {
+		fmt.Fprintf(stdout, "  + %s -> %s\n", mp.AgentID, filepath.ToSlash(mp.Dir))
+	}
+}
+
+// writeImportErrors reports parse/normalization/validation failures, one per
+// source, with the file that failed and why — the actionable detail (R4/CA3).
+func writeImportErrors(w io.Writer, errs []catalog.ImportError) {
+	for _, e := range errs {
+		fmt.Fprintf(w, "  ! %s: %v\n", filepath.ToSlash(e.SourcePath), e.Err)
+	}
+}
+
+// writeImportResult prints a per-agent line and a summary, and computes the exit
+// code from the outcomes: 2 if any source failed (actionable user error), else 0.
+// (A write I/O failure is also reported per-agent and maps to exit 2 here because
+// Apply already returned nil for the operation as a whole; a hard operational
+// failure is handled by the caller's earlier err check.)
+func writeImportResult(stdout, stderr io.Writer, outcomes []catalog.ImportOutcome) int {
+	var imported, skipped, failed int
+	for _, o := range outcomes {
+		switch {
+		case o.Err != nil:
+			failed++
+			src := o.SourcePath
+			if src == "" {
+				src = o.AgentID
+			}
+			fmt.Fprintf(stderr, "  ! %s: %v\n", filepath.ToSlash(src), o.Err)
+		case o.AlreadyExisted():
+			skipped++
+			fmt.Fprintf(stdout, "  = %s already exists at %s — not overwritten (skipped %d file%s).\n",
+				o.AgentID, filepath.ToSlash(o.Dir), len(o.Skipped), plural(len(o.Skipped), "", "s"))
+		default:
+			imported++
+			fmt.Fprintf(stdout, "  + %s imported to %s (created %d file%s).\n",
+				o.AgentID, filepath.ToSlash(o.Dir), len(o.Created), plural(len(o.Created), "", "s"))
+		}
+	}
+
+	fmt.Fprintf(stdout, "Import summary: %d imported, %d already existed, %d failed.\n",
+		imported, skipped, failed)
+	if failed > 0 {
+		return 2
+	}
+	return 0
 }
 
 // writePreview renders, on stdout, the directories and root artifacts a plan

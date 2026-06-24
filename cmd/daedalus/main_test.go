@@ -404,6 +404,153 @@ func TestRunAgentEditUnknownAgent(t *testing.T) {
 	}
 }
 
+// claudeAgentFile is a minimal valid Claude Code agent for CLI import tests.
+const claudeAgentFile = `---
+name: imported-agent
+description: An imported agent.
+tools: Read, Write
+model: opus
+color: blue
+---
+
+# Imported
+
+You are the imported agent.
+`
+
+// writeFile writes content under dir/name and returns the path.
+func writeFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestRunAgentImportFile covers Check 1/2/CA1/CA2: importing a Claude Code file
+// creates a canonical agent under .daedalus/agents/.
+func TestRunAgentImportFile(t *testing.T) {
+	ws := t.TempDir()
+	src := writeFile(t, t.TempDir(), "imported-agent.md", claudeAgentFile)
+
+	code, stdout, stderr := runAgentCmd("import", src, "--path", ws)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "imported") {
+		t.Errorf("stdout does not confirm the import; got:\n%s", stdout)
+	}
+	agentDir := filepath.Join(ws, ".daedalus", "agents", "imported-agent")
+	for _, name := range []string{"agent.yaml", "prompt.md"} {
+		if _, err := os.Stat(filepath.Join(agentDir, name)); err != nil {
+			t.Errorf("expected imported file %q: %v", name, err)
+		}
+	}
+}
+
+// TestRunAgentImportInvalid covers Check 3/CA3: an invalid source is reported with
+// an actionable error, exit 2, and is not written.
+func TestRunAgentImportInvalid(t *testing.T) {
+	ws := t.TempDir()
+	invalid := "---\nname: broken\ndescription:\n---\n\nbody\n"
+	src := writeFile(t, t.TempDir(), "broken.md", invalid)
+
+	code, _, stderr := runAgentCmd("import", src, "--path", ws)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 for an invalid source", code)
+	}
+	if !strings.Contains(stderr, "role") {
+		t.Errorf("stderr does not name the offending field; got:\n%s", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(ws, ".daedalus", "agents", "broken")); !os.IsNotExist(err) {
+		t.Errorf("invalid source created files (stat err=%v), want none", err)
+	}
+}
+
+// TestRunAgentImportNonDestructive covers Check 4/CA4: importing over an existing
+// id reports the conflict and does not overwrite.
+func TestRunAgentImportNonDestructive(t *testing.T) {
+	ws := t.TempDir()
+	src := writeFile(t, t.TempDir(), "imported-agent.md", claudeAgentFile)
+
+	if code, _, _ := runAgentCmd("import", src, "--path", ws); code != 0 {
+		t.Fatalf("first import failed")
+	}
+	prompt := filepath.Join(ws, ".daedalus", "agents", "imported-agent", "prompt.md")
+	const marker = "MANUAL"
+	if err := os.WriteFile(prompt, []byte(marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runAgentCmd("import", src, "--path", ws)
+	if code != 0 {
+		t.Fatalf("second import exit code = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "already exists") {
+		t.Errorf("stdout does not report the conflict; got:\n%s", stdout)
+	}
+	if b, _ := os.ReadFile(prompt); string(b) != marker {
+		t.Errorf("re-import overwrote the manual edit: %q", b)
+	}
+}
+
+// TestRunAgentImportPreviewWritesNothing covers the dry-run path.
+func TestRunAgentImportPreviewWritesNothing(t *testing.T) {
+	ws := t.TempDir()
+	src := writeFile(t, t.TempDir(), "imported-agent.md", claudeAgentFile)
+
+	code, stdout, stderr := runAgentCmd("import", src, "--path", ws, "--preview")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Preview") {
+		t.Errorf("stdout is not a preview; got:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(ws, ".daedalus", "agents", "imported-agent")); !os.IsNotExist(err) {
+		t.Errorf("preview wrote files (stat err=%v), want none", err)
+	}
+}
+
+// TestRunAgentImportDirectory covers the multi-agent directory path with a mix of
+// valid and invalid sources: valid ones import, invalid ones are reported, exit 2.
+func TestRunAgentImportDirectory(t *testing.T) {
+	ws := t.TempDir()
+	src := t.TempDir()
+	writeFile(t, src, "one.md", strings.Replace(claudeAgentFile, "imported-agent", "one", 1))
+	writeFile(t, src, "two.md", strings.Replace(claudeAgentFile, "imported-agent", "two", 1))
+	writeFile(t, src, "bad.md", "---\nname: bad\ndescription:\n---\n\nbody\n")
+
+	code, stdout, stderr := runAgentCmd("import", src, "--path", ws)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 (mixed valid/invalid); stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "2 imported") {
+		t.Errorf("summary does not report 2 imports; got:\n%s", stdout)
+	}
+	for _, id := range []string{"one", "two"} {
+		if _, err := os.Stat(filepath.Join(ws, ".daedalus", "agents", id)); err != nil {
+			t.Errorf("valid agent %q not imported despite a bad sibling: %v", id, err)
+		}
+	}
+}
+
+// TestRunAgentImportMissingSource covers the missing-source-path I/O error.
+func TestRunAgentImportMissingSource(t *testing.T) {
+	ws := t.TempDir()
+	code, _, _ := runAgentCmd("import", filepath.Join(ws, "does-not-exist.md"), "--path", ws)
+	if code != 1 {
+		t.Errorf("exit code = %d for a missing source path, want 1 (I/O error)", code)
+	}
+}
+
+// TestRunAgentImportNoSource covers the positional-arg guard.
+func TestRunAgentImportNoSource(t *testing.T) {
+	if code, _, _ := runAgentCmd("import", "--path", t.TempDir()); code != 2 {
+		t.Errorf("exit code = %d for import with no source, want 2", code)
+	}
+}
+
 // TestRunInitMultiBackendInputShape covers R6: the --backend flag accepts a
 // comma-separated list (the multi-backend shape) and records the selection. The
 // MVP set is a single backend, so a repeated claude-code collapses to one entry,

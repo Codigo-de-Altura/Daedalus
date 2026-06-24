@@ -143,7 +143,7 @@ looks like this:
 
 ```yaml
 # Daedalus canonical agent definition.
-# Generated from the built-in catalog. Keys are ordered and stable for clean diffs.
+# Managed by Daedalus. Keys are ordered and stable for clean diffs.
 # This file is the editable source of truth; the prompt lives in prompt.md.
 id: analyst
 version: "1"
@@ -335,14 +335,140 @@ daedalus: agent not found in catalog: "ghost"
 the agent must already exist in the workspace; clone or add it first
 ```
 
+## Importing agents
+
+If your project already has agents defined outside Daedalus — for example a
+Claude Code `.claude/agents/` directory — you do not have to rewrite them by
+hand. `daedalus agent import <source>` reads those definitions and converts them
+into the workspace's canonical format under `.daedalus/agents/`.
+
+The source may be a single **file** or a **directory**, and may appear before or
+after the flags:
+
+```sh
+daedalus agent import .claude/agents/reviewer.md
+```
+
+On success, Daedalus reports each imported agent and a summary:
+
+```
+  + reviewer imported to .daedalus/agents/reviewer (created 2 files).
+Import summary: 1 imported, 0 already existed, 0 failed.
+```
+
+See all options with:
+
+```sh
+daedalus agent import --help
+```
+
+### Options
+
+| Option | Description |
+|---|---|
+| `--path <dir>` | Target repository directory whose `.daedalus/agents/` receives the import. Defaults to the current directory. |
+| `--preview` | Dry run: show what would be imported without writing anything. |
+| `--help` | Show all available options. |
+
+### What gets recognized and how it is converted
+
+Import understands two source formats:
+
+- **Claude Code agents** (`.claude/agents/*.md`): a Markdown file with a YAML
+  frontmatter block followed by the prompt body.
+- **Canonical definitions**: an agent already in Daedalus's own format.
+
+When importing a Claude Code agent, Daedalus maps its fields to the canonical
+definition like this:
+
+| Claude Code field | Becomes | Notes |
+|---|---|---|
+| `name` | the agent **id** | Normalized to `kebab-case`. If `name` is missing, the id is derived from the file name. |
+| `description` | the **role** | |
+| the Markdown body | the **prompt** | Everything after the closing `---`. |
+| `model` | a `model` **parameter** | Only when present. |
+| `tools` | *dropped* | Backend-specific to Claude Code; not part of the canonical model in Phase 1. |
+| `color` | *dropped* | A Claude Code UI affordance with no canonical meaning. |
+
+`tools` and `color` are intentionally **not** carried over: they are specific to
+Claude Code and have no backend-agnostic meaning yet. When Daedalus later
+compiles your canonical agents back to `.claude/`, those concerns are resolved at
+that point.
+
+### Importing a whole directory
+
+Point `import` at a directory and Daedalus imports every valid agent it finds,
+reporting each one and a final summary:
+
+```sh
+daedalus agent import .claude/agents
+```
+
+```
+  + reviewer imported to .daedalus/agents/reviewer (created 2 files).
+  + planner imported to .daedalus/agents/planner (created 2 files).
+Import summary: 2 imported, 0 already existed, 0 failed.
+```
+
+If one source in the directory is invalid, it is reported and skipped — it does
+**not** abort the valid ones (see [Invalid sources](#invalid-sources)).
+
+### Previewing without writing
+
+Use `--preview` to perform a **dry run** that lists what would be imported but
+**writes nothing**:
+
+```sh
+daedalus agent import .claude/agents --preview
+```
+
+```
+Preview of importing 2 agent(s):
+  + reviewer -> .daedalus/agents/reviewer
+  + planner -> .daedalus/agents/planner
+```
+
+If nothing in the source is importable, the preview says so:
+
+```
+Preview: no importable agents found.
+```
+
+### It will not overwrite existing agents
+
+Import is **non-destructive**. If an agent id already exists in the workspace,
+Daedalus leaves the existing files untouched and marks it as skipped:
+
+```
+  = reviewer already exists at .daedalus/agents/reviewer — not overwritten (skipped 2 files).
+Import summary: 0 imported, 1 already existed, 0 failed.
+```
+
+### Invalid sources
+
+A source that cannot be converted — for example, one whose role ends up empty —
+is reported with the offending file and the reason, prefixed with `!`. Other
+valid agents are still imported, but the run exits with status code `2` so you
+notice the failure:
+
+```
+  ! .claude/agents/broken.md: agent "broken" has an empty role
+Import summary: 0 imported, 0 already existed, 1 failed.
+```
+
+If the source **path** itself cannot be read at all (for example, it does not
+exist), the run fails with status code `1` and writes nothing.
+
 ## Notes & limitations
 
 - The catalog ships **embedded in the binary**. A remote catalog or marketplace
   is out of scope for Phase 1.
-- Adding and cloning an agent are **non-destructive**: existing definitions and
-  your manual edits are never overwritten.
+- Adding, cloning, and importing agents are **non-destructive**: existing
+  definitions and your manual edits are never overwritten.
 - A clone is **independent** of the built-in agent it came from — editing the
   clone never changes the original.
+- Import converts definitions only; it does **not** carry over backend-specific
+  Claude Code fields (`tools`, `color`), which have no canonical meaning yet.
 - Phase 1 **configures** your project's AI structure; it does not **execute**
   agents — that stays with your runtime (for example, Claude Code).
 - Edits are checked structurally before writing, but full validation against the

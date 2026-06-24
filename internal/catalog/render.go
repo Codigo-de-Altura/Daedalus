@@ -29,7 +29,7 @@ func renderDefinition(a Agent) string {
 	var b strings.Builder
 
 	b.WriteString("# Daedalus canonical agent definition.\n")
-	b.WriteString("# Generated from the built-in catalog. Keys are ordered and stable for clean diffs.\n")
+	b.WriteString("# Managed by Daedalus. Keys are ordered and stable for clean diffs.\n")
 	b.WriteString("# This file is the editable source of truth; the prompt lives in prompt.md.\n")
 
 	writeScalar(&b, "id", a.ID)

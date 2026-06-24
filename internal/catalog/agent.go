@@ -99,6 +99,50 @@ func IsKebabCase(id string) bool {
 	return kebabCase.MatchString(id)
 }
 
+// NormalizeID converts an arbitrary source identifier (e.g. a Claude Code agent
+// `name` or a file base name) into a canonical kebab-case id (R6/CA5). The
+// transformation is deterministic and lossy-by-design: it lowercases ASCII,
+// turns any run of non-alphanumeric characters into a single dash, and trims
+// leading/trailing dashes. A source that already is kebab-case is returned
+// unchanged, so importing a well-formed id never mangles it.
+//
+// It returns an error when the source cannot be normalized into a *non-empty*
+// kebab-case id (e.g. it is empty or contains no ASCII alphanumerics at all),
+// because silently inventing an id would violate "report, don't guess" — the
+// caller surfaces this as an actionable import error rather than writing an agent
+// under a fabricated name.
+func NormalizeID(source string) (string, error) {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range source {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r - 'A' + 'a') // fold to lowercase
+			prevDash = false
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevDash = false
+		default:
+			// Any other character (space, '_', '.', punctuation, non-ASCII) becomes a
+			// separator; collapse consecutive separators into a single dash.
+			if !prevDash {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	id := strings.Trim(b.String(), "-")
+	if id == "" {
+		return "", fmt.Errorf("cannot derive a kebab-case id from %q", source)
+	}
+	// The construction above can only produce a valid kebab-case id, but assert it
+	// so a future change to the rule cannot let a malformed id through unnoticed.
+	if !IsKebabCase(id) {
+		return "", fmt.Errorf("derived id %q from %q is not valid kebab-case", id, source)
+	}
+	return id, nil
+}
+
 // Validate checks that an agent is structurally well-formed against the canonical
 // contract: a kebab-case id, a non-empty role, a non-empty prompt, and parameters
 // whose keys are present, unique and of a known type. It is a *structural*

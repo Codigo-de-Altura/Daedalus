@@ -127,8 +127,14 @@ func parseDefinition(body string) (Agent, error) {
 
 		switch key {
 		case "id":
-			// Parsed for completeness but not trusted: Load overrides ID with the
-			// directory name (the canonical identity).
+			// Captured into the model; Load overrides it with the directory name (the
+			// canonical identity of a materialized agent), but importers of a loose
+			// single-file definition rely on this parsed value as the id source.
+			s, err := unquoteScalar(val)
+			if err != nil {
+				return Agent{}, fmt.Errorf("id: %v", err)
+			}
+			a.ID = s
 			sawID = true
 		case "version":
 			// Accepted and ignored: the on-disk version is informational for this
