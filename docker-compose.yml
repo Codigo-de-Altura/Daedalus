@@ -1,0 +1,13 @@
+# Local development service for Daedalus. Build and start it with:
+#   docker compose up --build
+#
+# Daedalus is an interactive TUI, so stdin is kept open and a TTY is allocated;
+# in a non-interactive context the binary prints a notice and exits cleanly.
+services:
+  daedalus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: daedalus:dev
+    stdin_open: true
+    tty: true
