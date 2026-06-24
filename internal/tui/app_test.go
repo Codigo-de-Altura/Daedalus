@@ -282,7 +282,7 @@ func TestHelpContainsBindings(t *testing.T) {
 	m = updated.(Model)
 
 	listView := m.View()
-	if !strings.Contains(listView, "open preview") || !strings.Contains(listView, "quit") {
+	if !strings.Contains(listView, "open") || !strings.Contains(listView, "quit") {
 		t.Errorf("list help should advertise open/quit, got:\n%s", listView)
 	}
 

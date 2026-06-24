@@ -1,36 +1,40 @@
-# Workflow DAG YAML Model — Usage Guide
+# Ticket 04-01 — DAG Workflow YAML Model
 
-> Authored and maintained by C-3PO, technical writer for Daedalus. Part of the growing end-user usage guide. Written for the person who uses the Daedalus product, not for internals.
+> **Pointer:** the user-facing guide for this feature lives in the manual:
+> [`docs/guide/managing-workflows.md`](../../../../docs/guide/managing-workflows.md).
+> This file is only a pointer; the chapter is the actual guide.
 
 ## Overview
 
-_To be completed by C-3PO after implementation._
+Daedalus models a project's pipeline as a declarative **DAG workflow** in your
+workspace's `.daedalus/workflows/` directory, one YAML file per workflow. The
+`daedalus workflow` command lets you create, list, show, and remove workflows,
+and add, edit, and remove their **phases**. Each workflow has a stable
+`kebab-case` name (its file name) and an ordered list of phases, each with the
+fixed schema `{ id, agent, inputs, outputs, gate, depends_on }` — where
+`depends_on` declares the DAG edges.
 
 ## How to use
 
-Daedalus represents a workflow as a declarative DAG stored as a YAML file under `.daedalus/workflows/<name>.yaml`. Each workflow is an ordered list of **phases**; every phase references the agent that runs it, the artifacts it consumes and produces, a validation gate, and the phases it depends on.
+- `daedalus workflow list` — list persisted workflows (name, phase count).
+- `daedalus workflow create <name> [--preview]` — create an empty workflow as
+  `.daedalus/workflows/<name>.yaml`. Non-destructive: a duplicate name is
+  reported, not overwritten.
+- `daedalus workflow show <name>` — print the workflow's file content verbatim.
+- `daedalus workflow add-phase <name> --id <id> --agent <a> --gate <g> [flags]`
+  — append a phase. The list flags take comma-separated values.
+- `daedalus workflow edit-phase <name> --id <id> [flags]` — edit a phase in
+  place (use `--new-id` to rename).
+- `daedalus workflow remove-phase <name> --id <id>` — remove a phase.
+- `daedalus workflow remove <name>` — delete only that workflow's file.
 
-A phase looks like this:
+## Options
 
-```yaml
-phases:
-  - id: spec
-    agent: analyst
-    inputs:  [brief]
-    outputs: [spec]
-    gate: spec-gate
-    depends_on: [brief]
-```
+- `--path <dir>` — target repository directory (defaults to the current one).
+- `--preview` — dry run on `create`: show the file that would be written, writing nothing.
+- `--id`, `--agent`, `--gate`, `--inputs`, `--outputs`, `--depends-on`,
+  `--new-id` — set phase fields on the `*-phase` operations (`id`/`agent`/`gate`
+  required on `add-phase`).
 
-You author and edit workflows by editing these YAML files (or through Daedalus' editing operations). Daedalus loads the file into its canonical model and writes it back as clean, deterministic YAML.
-
-## Options / flags
-
-_To be completed by C-3PO after implementation (commands, flags and editing operations exposed for workflows)._
-
-## Notes & limitations
-
-- **Phase 1: Daedalus configures the AI structure; it does not execute agents.** This feature models and edits the workflow definition only — it does not run the pipeline or invoke any agent.
-- Workflow definitions are backend-agnostic; they are not tied to Claude Code or any specific agent runtime.
-- Serialization is deterministic (stable, ordered keys) to keep git diffs clean.
-- Semantic graph validation (cycles, missing artifacts, unknown agents) is covered separately by the DAG validation feature.
+See [`docs/guide/managing-workflows.md`](../../../../docs/guide/managing-workflows.md)
+for full examples, expected output, the phase schema, and the on-disk format.

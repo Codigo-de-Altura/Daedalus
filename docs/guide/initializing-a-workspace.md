@@ -15,11 +15,16 @@ daedalus init
 ```
 
 When the workspace does not exist yet, you will see a confirmation that it was
-created from scratch:
+created from scratch, followed by a line reporting the factory workflow that
+`init` seeds into it:
 
 ```
 Created Daedalus workspace at .daedalus from scratch.
+Seeded factory workflow "sdd-default" at .daedalus/workflows/sdd-default.yaml.
 ```
+
+See [The default SDD workflow](managing-workflows.md#the-default-sdd-workflow)
+for what `sdd-default` contains.
 
 To target a different directory, use `--path`:
 
@@ -51,6 +56,7 @@ daedalus init --help
   agents/           # agent definitions
   prompts/          # shared prompts
   workflows/        # DAG workflows
+    sdd-default.yaml  # the factory SDD workflow, seeded by init
   specs/            # specifications / PRD
   architecture/     # architecture documents
   epics/            # epics
@@ -58,6 +64,16 @@ daedalus init --help
   docs/             # derived documentation
   .state/           # progress state (tracked in git)
 ```
+
+### The seeded factory workflow
+
+Besides the directory structure and the two root artifacts, `init` seeds one
+ready-to-use workflow — `sdd-default.yaml` — into `workflows/`, so you start with
+the default SDD pipeline instead of an empty directory. Like everything `init`
+produces it is **non-destructive**: if you have already created or edited an
+`sdd-default.yaml`, `init` leaves your file untouched and reports it as already
+present. See [The default SDD workflow](managing-workflows.md#the-default-sdd-workflow)
+for its phases and what each one does.
 
 ## The root artifacts: manifest & project `init.md`
 
@@ -173,10 +189,13 @@ workspace structure stays complete.
 There are two possible outcomes:
 
 **The workspace is already complete.** Nothing needs to change, so Daedalus
-leaves every file untouched and reports that the workspace is up to date:
+leaves every file untouched and reports that the workspace is up to date. The
+factory workflow is reported as already present, confirming your copy was left
+intact:
 
 ```
 Existing Daedalus workspace at .daedalus is already complete — nothing to update.
+Factory workflow "sdd-default" already present at .daedalus/workflows/sdd-default.yaml — left intact.
 ```
 
 **The workspace is missing some pieces.** Daedalus first prints a preview of
@@ -209,6 +228,24 @@ Preview of changes to the Daedalus workspace at ./my-repo:
   + docs/ (directory)
   + init.md (file)
 ```
+
+When the preview is for a brand-new workspace, the factory workflow appears in
+the list too, marked as a factory workflow — but, like every preview, nothing is
+written:
+
+```
+Preview of changes to the Daedalus workspace at .daedalus:
+  + agents/ (directory)
+  + prompts/ (directory)
+  + workflows/ (directory)
+  ...
+  + daedalus.yaml (file)
+  + init.md (file)
+  + .daedalus/workflows/sdd-default.yaml (factory workflow)
+```
+
+The factory-workflow line is shown only when it would actually be written: if an
+`sdd-default.yaml` already exists, the preview does not list it as a change.
 
 This lets you see what an `init` run would do before committing to it. Run the
 command again without `--preview` to apply the changes.

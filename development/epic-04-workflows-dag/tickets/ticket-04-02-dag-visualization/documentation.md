@@ -1,24 +1,40 @@
-# Workflow DAG Visualization — Usage Guide
+# Ticket 04-02 — Workflow DAG Visualization
 
-> Authored and maintained by C-3PO, technical writer for Daedalus. Part of the growing end-user usage guide. Written for the person who uses the Daedalus product, not for internals.
+> **Pointer:** the user-facing guide for this feature lives in the manual, as a
+> section of the workflows chapter:
+> [`docs/guide/managing-workflows.md` → Visualizing a workflow in the TUI](../../../../docs/guide/managing-workflows.md#visualizing-a-workflow-in-the-tui).
+> This file is only a pointer; the chapter is the actual guide.
 
 ## Overview
 
-_To be completed by C-3PO after implementation._
+Daedalus' interactive terminal interface (run `daedalus` with no subcommand) can
+draw a workflow as a read-only **graph (DAG)**, alongside the prompt browser. The
+interface opens on the **Prompts** section; `tab` switches to the **Workflows**
+section, and opening a workflow there renders its phases as nodes and its
+`depends_on` dependencies as edges, laid out top-to-bottom in dependency order.
 
 ## How to use
 
-In the Daedalus TUI you can open a workflow and see it drawn as a graph (DAG) right in your terminal, instead of reading the raw YAML. Each **node** is a phase of the workflow and shows which **agent** runs it; each **edge** is a dependency between phases, so you can read the pipeline from start to finish (for example: brief → spec → architecture → epics → tickets → validation → docs).
-
-Navigate to the workflows area, select a workflow, and the DAG view renders it.
-
-## Options / flags
-
-_To be completed by C-3PO after implementation (navigation entry points and any keyboard shortcuts for the DAG view)._
+- Run `daedalus` in an interactive terminal — it opens on the **Prompts**
+  section.
+- Press `tab` to switch to the **Workflows** section (title becomes
+  `Daedalus · Workflows`).
+- Move the selection with `↑`/`k` and `↓`/`j`; press `enter` (or `l`) to open the
+  selected workflow's DAG view.
+- In the DAG view, each phase is a bordered node (`<id>  @<agent>` plus compact
+  `in:` / `out:` / `gate:` lines), and each dependency is a downward connector
+  labelled `after <predecessors>`.
+- Scroll with `↑`/`↓`, `pgup`/`pgdn` (also `b`/`f`/`space`), and `g`/`G`; press
+  `esc` to return to the list; `q` / `Ctrl+C` to quit; `?` to toggle help.
 
 ## Notes & limitations
 
-- **Phase 1: Daedalus configures the AI structure; it does not execute agents.** The DAG view is read-only presentation — it does not run the workflow or invoke any agent.
-- The view shows the workflow as defined; it does not edit it. Editing is done on the workflow YAML.
-- Semantic validation (cycles, missing artifacts, unknown agents) is a separate feature; the view shows the graph, not the validation report.
-- Designed for workflows of moderate size, such as the built-in `sdd-default`.
+- The DAG view is strictly **read-only**: it draws the pipeline but never edits a
+  phase or runs the workflow.
+- It degrades gracefully: an empty workflow shows a clear empty state, an
+  unreadable file shows an actionable error, and a dependency cycle is drawn in
+  declared order with a warning instead of hanging.
+- Phase 1 configures the AI structure; it does not execute workflows.
+
+See [`docs/guide/managing-workflows.md` → Visualizing a workflow in the TUI](../../../../docs/guide/managing-workflows.md#visualizing-a-workflow-in-the-tui)
+for the full walkthrough, the node/edge layout, and the keyboard shortcuts.
