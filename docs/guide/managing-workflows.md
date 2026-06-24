@@ -411,6 +411,102 @@ daedalus: workflow not found: "ghost"
 the workflow must already exist; create it first
 ```
 
+## Validating a workflow
+
+The edit checks above are **structural** — they keep each phase well-formed. To
+check that the workflow as a whole describes a coherent, runnable graph, use
+`daedalus workflow validate <name>`. This is **semantic** validation of the DAG:
+it reads a workflow you have already defined and reports problems with the graph
+itself.
+
+It checks for:
+
+- **Cycles** — a loop in the `depends_on` dependencies, so the graph is not a DAG.
+- **Missing artifacts** — a phase consumes an `input` that is neither the initial
+  `brief` artifact nor an `output` of any of its predecessors (any phase reachable
+  by following `depends_on` back toward the roots).
+- **Unknown agents** — a phase references an `agent` that does not exist in the
+  workspace.
+- **Unknown dependencies** — a `depends_on` entry that names no existing phase
+  (and is not the initial `brief`); this is usually a typo.
+
+```sh
+daedalus workflow validate release-pipeline
+```
+
+A workflow with no problems reports that it is valid:
+
+```
+Workflow "release-pipeline" is semantically valid.
+```
+
+When there are problems, each is reported on its own line, naming the affected
+phase, the kind of problem, the observed value, and what would make it valid:
+
+```
+Workflow "release-pipeline" is semantically invalid (2 findings):
+  - phase "build": missing-artifact: observed "blueprint"; no predecessor phase produces this input artifact and it is not the initial artifact "brief"; add a predecessor that outputs it, or correct the input
+  - phase "build": unknown-agent: observed "wizard"; no agent with this id exists in the workspace catalog; create or import the agent, or correct the reference
+```
+
+### Options
+
+| Option | Description |
+|---|---|
+| `--path <dir>` | Target repository directory whose `.daedalus/workflows/` holds the workflow. Defaults to the current directory. |
+
+### What each problem looks like
+
+A **cycle** names the phases that form the loop, rendered as a chain so it is
+self-evident:
+
+```
+Workflow "cycle-pipe" is semantically invalid (1 finding):
+  - phase "alpha": cycle: observed "alpha -> beta -> alpha"; these phases form a dependency cycle, so the workflow is not a DAG; break the loop by removing one of the depends_on edges
+```
+
+A **missing artifact** names the phase and the input that no predecessor produces:
+
+```
+Workflow "missing-art" is semantically invalid (1 finding):
+  - phase "build": missing-artifact: observed "spec"; no predecessor phase produces this input artifact and it is not the initial artifact "brief"; add a predecessor that outputs it, or correct the input
+```
+
+An **unknown agent** names the phase and the agent that could not be found:
+
+```
+Workflow "unknown-agent" is semantically invalid (1 finding):
+  - phase "spec": unknown-agent: observed "wizard"; no agent with this id exists in the workspace catalog; create or import the agent, or correct the reference
+```
+
+An **unknown dependency** names the phase and the dangling reference (here a typo
+of `brief`):
+
+```
+Workflow "unknown-dep" is semantically invalid (1 finding):
+  - phase "spec": unknown-dependency: observed "breif"; depends_on references no existing phase (and is not the initial artifact "brief"); fix the reference or add the missing phase
+```
+
+### Built-in agents are always known
+
+The unknown-agent check resolves an agent against the workspace's agent catalog,
+which includes **both** the agents you have materialized under `.daedalus/agents/`
+**and** the built-in agents (`analyst`, `architect`, `planner`, `validator`,
+`documenter`). A phase that references a built-in agent you have **not** added to
+the workspace yet is therefore **valid** — the built-in still exists as far as the
+project is concerned, so it is not flagged. Only an agent id that is neither
+materialized nor a known built-in is reported as unknown.
+
+### Exit codes
+
+`validate` sets its exit code so you can gate on it from a script or CI:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | The workflow is semantically valid. |
+| `1` | The workflow is semantically invalid (one or more findings). |
+| `2` | A usage or load error — for example, the workflow does not exist:<br>`daedalus: workflow not found: "ghost"` |
+
 ## Visualizing a workflow in the TUI
 
 Besides the commands above, Daedalus has an interactive terminal interface that

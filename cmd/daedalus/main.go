@@ -1296,6 +1296,8 @@ func runWorkflow(args []string, stdout, stderr io.Writer) int {
 		return runWorkflowShow(args[1:], stdout, stderr)
 	case "remove":
 		return runWorkflowRemove(args[1:], stdout, stderr)
+	case "validate":
+		return runWorkflowValidate(args[1:], stdout, stderr)
 	case "add-phase":
 		return runWorkflowAddPhase(args[1:], stdout, stderr)
 	case "edit-phase":
@@ -1317,6 +1319,7 @@ const workflowUsage = "Usage: daedalus workflow <operation> [flags]\n\n" +
 	"  create <name>                 create a new (empty) workflow as <name>.yaml\n" +
 	"  show <name>                   print a workflow's file content verbatim (raw)\n" +
 	"  remove <name>                 delete a workflow's file\n" +
+	"  validate <name>               check the DAG semantics (cycles, artifacts, agents)\n" +
 	"  add-phase <name> --id <id> --agent <a> --gate <g> [flags]   append a phase\n" +
 	"  edit-phase <name> --id <id> [flags]                         edit a phase\n" +
 	"  remove-phase <name> --id <id>                               remove a phase\n\n" +
@@ -1531,6 +1534,123 @@ func runWorkflowRemove(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Removed workflow %q from %s.\n",
 		name, filepath.ToSlash(filepath.Join(workflowsRoot, name+workflows.FileExt)))
 	return 0
+}
+
+// runWorkflowValidate handles `daedalus workflow validate <name>`: it loads the
+// workflow and runs the core semantic validator (internal/workflows.ValidateGraph)
+// against it, reporting cycles, missing artifacts and unknown agents. This CLI
+// layer is the one that resolves agent existence: the core stays backend-agnostic
+// (it never imports the catalog), so we build the set of known agent ids here and
+// inject it as a predicate. Exit code is 0 when valid, 1 when semantically invalid
+// (so a CI gate can branch on it), and 2 on a usage/load error.
+func runWorkflowValidate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus workflow validate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/workflows/ holds the workflow")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus workflow validate <name> [--path .]\n\n"+
+			"Validate a workflow's DAG semantics: dependency cycles, input artifacts not\n"+
+			"produced by any predecessor (nor the initial 'brief'), and agents that do not\n"+
+			"exist in the workspace. Exit 0 if valid, 1 if invalid, 2 on a usage error.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	name, flags, err := splitWorkflowName(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !workflows.IsKebabCase(name) {
+		fmt.Fprintf(stderr, "daedalus: workflow name %q is not valid kebab-case\n", name)
+		return 2
+	}
+
+	wf, err := workflows.Load(workflowsRootFor(*dir), name)
+	if err != nil {
+		switch {
+		case errors.Is(err, workflows.ErrWorkflowNotFound):
+			logger.Error("workflow validate rejected", "phase", "load", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		case errors.Is(err, workflows.ErrMalformedWorkflow):
+			logger.Error("workflow validate failed", "phase", "load", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		default:
+			logger.Error("workflow validate failed", "phase", "load", "name", name, "err", err)
+			fmt.Fprintf(stderr, "daedalus: workflow validate failed: %v\n", err)
+			return 1
+		}
+	}
+
+	known := knownAgentsFor(*dir)
+	report := wf.ValidateGraph(func(id string) bool { return known[id] })
+
+	logger.Info("workflow validated",
+		"name", name, "valid", report.Valid(), "findings", len(report.Findings), "known_agents", len(known))
+
+	if report.Valid() {
+		fmt.Fprintf(stdout, "Workflow %q is semantically valid.\n", name)
+		return 0
+	}
+
+	fmt.Fprintf(stdout, "Workflow %q is semantically invalid (%d finding%s):\n",
+		name, len(report.Findings), plural(len(report.Findings), "", "s"))
+	for _, f := range report.Findings {
+		fmt.Fprintf(stdout, "  - %s\n", f.Error())
+	}
+	return 1
+}
+
+// knownAgentsFor builds the set of agent ids the workspace recognizes, used by
+// `workflow validate` to resolve the unknown-agent check. It is the union of two
+// sources:
+//
+//   - the agents materialized in the workspace (each subdirectory of
+//     `.daedalus/agents/` is a materialized agent id, per catalog.Load's layout), and
+//   - the built-in catalog ids (catalog.Builtin.List()).
+//
+// The built-ins are included on purpose: a phase may legitimately reference a
+// built-in agent (analyst, architect, ...) that the user has not materialized into
+// the workspace yet — it still "exists" as far as the project is concerned, so
+// flagging it as unknown would be a false positive. Only an id that is neither
+// materialized nor a known built-in is genuinely unknown. This resolution lives in
+// the CLI, not in internal/workflows, so the core stays backend/catalog-agnostic.
+func knownAgentsFor(dir string) map[string]bool {
+	known := make(map[string]bool)
+
+	// Built-in catalog ids are always considered known.
+	for _, e := range catalog.Builtin.List() {
+		known[e.ID] = true
+	}
+
+	// Materialized workspace agents: each subdirectory of .daedalus/agents/ whose
+	// name is a valid agent id. A missing agents directory is simply "no extra
+	// agents" — not an error — so validating a workspace without materialized agents
+	// still works (only built-ins are known).
+	agentsRoot := filepath.Join(dir, workspace.Name, catalog.AgentsDir)
+	entries, err := os.ReadDir(agentsRoot)
+	if err != nil {
+		return known
+	}
+	for _, de := range entries {
+		if !de.IsDir() {
+			continue
+		}
+		if catalog.IsKebabCase(de.Name()) {
+			known[de.Name()] = true
+		}
+	}
+	return known
 }
 
 // runWorkflowAddPhase handles `daedalus workflow add-phase <name> --id <id> ...`:
