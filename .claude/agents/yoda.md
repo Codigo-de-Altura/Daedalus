@@ -2,7 +2,7 @@
 name: yoda
 description: Backend validator — runs a ticket's validation.md against acceptance criteria, reports verdict only, never implements
 tools: Read, Glob, Grep, Bash, Write
-model: sonnet
+model: opus
 color: green
 ---
 

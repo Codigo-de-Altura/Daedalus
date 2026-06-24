@@ -1,24 +1,27 @@
-# Built-in Agent Catalog — Usage Guide
+# Ticket 02-01 — Built-in Agent Catalog
 
-> _Authored and maintained by C-3PO as the feature is implemented and validated._
+> **Pointer:** the user-facing guide for this feature lives in the manual:
+> [`docs/guide/managing-agents.md`](../../../../docs/guide/managing-agents.md).
+> This file is only a pointer; the chapter is the actual guide.
 
 ## Overview
 
-_To be completed by C-3PO after implementation._
+Daedalus ships with a built-in catalog of five canonical SDD agents (`analyst`,
+`architect`, `planner`, `validator`, `documenter`), embedded in the binary. The
+`daedalus agent` command lets you list those agents and materialize any of them
+into your workspace as an editable, canonical definition.
 
 ## How to use
 
-_To be completed by C-3PO after implementation._
+- `daedalus agent list` — list the built-in agents (id and role), ordered by id.
+- `daedalus agent add <id>` — materialize an agent into
+  `.daedalus/agents/<id>/` as `agent.yaml` + `prompt.md`. The add is
+  non-destructive: an existing agent is never overwritten.
 
-- Listing the built-in agents available in the catalog.
-- Materializing a built-in agent into the `.daedalus/agents/` workspace.
+## Options
 
-## Options / flags
+- `--path <dir>` — target repository directory (defaults to the current one).
+- `--preview` — dry run: show the files that would be created, writing nothing.
 
-_To be completed by C-3PO after implementation._
-
-## Notes & limitations
-
-- The catalog ships embedded in the binary; a remote catalog/marketplace is out of scope for Phase 1.
-- The five canonical agents are `analyst`, `architect`, `planner`, `validator`, `documenter`.
-- Phase 1: Daedalus configures the AI structure; it does not execute agents.
+See [`docs/guide/managing-agents.md`](../../../../docs/guide/managing-agents.md)
+for full examples, expected output, and the on-disk layout.
