@@ -24,6 +24,7 @@ import (
 	"github.com/Codigo-de-Altura/Daedalus/internal/catalog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
 	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
+	"github.com/Codigo-de-Altura/Daedalus/internal/specs"
 	"github.com/Codigo-de-Altura/Daedalus/internal/tui"
 	"github.com/Codigo-de-Altura/Daedalus/internal/workflows"
 	"github.com/Codigo-de-Altura/Daedalus/internal/workspace"
@@ -47,6 +48,8 @@ func run(args []string) int {
 			return runPrompt(args[1:], os.Stdout, os.Stderr)
 		case "workflow":
 			return runWorkflow(args[1:], os.Stdout, os.Stderr)
+		case "spec":
+			return runSpec(args[1:], os.Stdout, os.Stderr)
 		default:
 			fmt.Fprintf(os.Stderr, "daedalus: unknown command %q\nrun 'daedalus --help' for usage\n", args[0])
 			return 2
@@ -1982,6 +1985,492 @@ func writeWorkflowSchemaErrors(w io.Writer, err error) {
 	}
 	for _, se := range ve.Errors {
 		fmt.Fprintf(w, "  - %s\n", se.Error())
+	}
+}
+
+// runSpec handles the `daedalus spec` subcommand, a thin CLI surface over the SDD
+// backlog's brief/spec domain (internal/specs). It dispatches to the operation
+// named by the next argument so the verb set can grow without reshaping run():
+// capture (persist a brief and seed its spec), list, show, edit, remove. It keeps
+// the same conventions as runPrompt/runWorkflow — own usage, exit code 2 for usage
+// errors, logging to stderr — so the CLI feels uniform.
+//
+// Phase 1: none of these operations run the analyst agent (R5/CA5). `capture` only
+// manages the definition — it persists the human's brief and seeds the canonical
+// spec destination, wired (in frontmatter) to the analyst step of the default SDD
+// workflow; the user generates the spec body by running the agent on their backend.
+func runSpec(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, specUsage)
+		return 2
+	}
+
+	switch args[0] {
+	case "capture":
+		return runSpecCapture(args[1:], stdout, stderr)
+	case "list":
+		return runSpecList(args[1:], stdout, stderr)
+	case "show":
+		return runSpecShow(args[1:], stdout, stderr)
+	case "edit":
+		return runSpecEdit(args[1:], stdout, stderr)
+	case "remove":
+		return runSpecRemove(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown spec operation %q\n\n%s", args[0], specUsage)
+		return 2
+	}
+}
+
+// specUsage is the shared help text for the `spec` subcommand, surfaced when no
+// operation (or an unknown one) is given.
+const specUsage = "Usage: daedalus spec <operation> [flags]\n\n" +
+	"Work with the SDD backlog's briefs and specs in .daedalus/specs/.\n" +
+	"Daedalus manages the definition only; it does not run the analyst agent.\n\n" +
+	"Operations:\n" +
+	"  capture <slug> --title <t> [flags]   capture a brief and seed its spec/PRD\n" +
+	"  list                                 list captured briefs (slug, title, has-spec)\n" +
+	"  show <slug> [--brief]                print the spec (or the brief) verbatim\n" +
+	"  edit <slug> [flags]                  edit the materialized spec's title or body\n" +
+	"  remove <slug> [--brief]              delete the spec (or the brief) file\n\n" +
+	"Run 'daedalus spec <operation> --help' for an operation's flags.\n"
+
+// specsRootFor builds the canonical `.daedalus/specs/` directory under dir so a
+// brief/spec lands exactly where init scaffolds the specs/ directory. Built here
+// rather than in the specs package so that package stays free of the
+// workspace-location convention (mirrors promptsRootFor/workflowsRootFor).
+func specsRootFor(dir string) string {
+	return filepath.Join(dir, workspace.Name, specs.SpecsDir)
+}
+
+// runSpecCapture handles `daedalus spec capture <slug> --title <t>`: it captures a
+// brief and seeds its canonical spec destination under .daedalus/specs/. The brief
+// is validated before any write, so an invalid slug/title is rejected with an
+// actionable error and nothing is written. It is non-destructive — an existing brief
+// or spec (e.g. one the user has refined) is preserved, not overwritten (R4/R7) —
+// and --preview reports the files that would be created without writing anything.
+func runSpecCapture(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus spec capture", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/specs/ the brief is captured into")
+	title := fs.String("title", "", "brief title (required)")
+	body := fs.String("body", "", "brief body inline")
+	bodyFile := fs.String("body-file", "", "brief body from a file (takes precedence over --body)")
+	preview := fs.Bool("preview", false, "show the files that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus spec capture <slug> --title <t> [flags]\n\n"+
+			"Capture a brief as <slug>.brief.md and seed its canonical spec destination\n"+
+			"<slug>.md in the target workspace's .daedalus/specs/ directory. The spec is\n"+
+			"wired to the analyst step of the sdd-default workflow and references the brief,\n"+
+			"but Daedalus does NOT run the agent: generate the spec on your backend and\n"+
+			"refine it. Existing files are not overwritten. If both --body-file and --body\n"+
+			"are given, --body-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitSpecSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	// Resolve the body: --body-file wins over --body so a caller can keep a long
+	// brief in a file without it being shadowed by an accidental inline one.
+	bodyText := *body
+	if *bodyFile != "" {
+		b, err := os.ReadFile(*bodyFile)
+		if err != nil {
+			logger.Error("spec capture rejected", "phase", "flags", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return 2
+		}
+		bodyText = string(b)
+	}
+
+	brief := specs.Brief{Slug: slug, Title: *title, Body: bodyText}
+	specsRoot := specsRootFor(*dir)
+
+	// Plan first: validates the brief and renders both files' content without touching
+	// the filesystem, so an invalid brief fails as a usage error before any write or
+	// preview.
+	plan, err := specs.PlanCapture(specsRoot, brief)
+	if err != nil {
+		logger.Error("spec capture rejected", "phase", "plan", "slug", slug, "err", err)
+		if isSpecInvalid(err) {
+			fmt.Fprintf(stderr, "daedalus: brief %q is invalid; it was not captured:\n", slug)
+			writeSpecSchemaErrors(stderr, err)
+		} else {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		}
+		return 2
+	}
+
+	logger.Info("spec capture planned", "slug", plan.Brief.Slug, "brief", plan.BriefPath, "spec", plan.SpecPath)
+
+	if *preview {
+		fmt.Fprintf(stdout, "Preview of capturing brief %q into %s:\n", plan.Brief.Slug, filepath.ToSlash(specsRoot))
+		fmt.Fprintf(stdout, "  + %s (brief)\n", filepath.ToSlash(filepath.Base(plan.BriefPath)))
+		fmt.Fprintf(stdout, "  + %s (spec, seeded; generate with the analyst on your backend)\n",
+			filepath.ToSlash(filepath.Base(plan.SpecPath)))
+		logger.Info("spec capture preview only", "slug", plan.Brief.Slug, "applied", false)
+		return 0
+	}
+
+	res, err := plan.Apply()
+	if err != nil {
+		logger.Error("spec capture failed", "phase", "apply", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: spec capture failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("spec captured",
+		"slug", res.Slug, "brief_created", res.BriefCreated, "spec_created", res.SpecCreated)
+	writeSpecCaptureResult(stdout, res)
+	return 0
+}
+
+// writeSpecCaptureResult reports the outcome of a capture, choosing wording that
+// unambiguously distinguishes a fresh capture from the non-destructive case where
+// the brief and/or its spec already existed and were preserved (R4/R7).
+func writeSpecCaptureResult(stdout io.Writer, res *specs.CaptureResult) {
+	brief := filepath.ToSlash(res.BriefPath)
+	spec := filepath.ToSlash(res.SpecPath)
+	switch {
+	case res.BriefCreated && res.SpecCreated:
+		fmt.Fprintf(stdout, "Captured brief %q at %s and seeded its spec at %s.\n", res.Slug, brief, spec)
+		fmt.Fprintf(stdout, "Generate the spec by running the %q agent on your backend, then refine %s.\n",
+			specs.AnalystAgent, spec)
+	case !res.BriefCreated && !res.SpecCreated:
+		fmt.Fprintf(stdout, "Brief %q and its spec already exist — left intact (nothing overwritten).\n", res.Slug)
+	case res.SpecCreated:
+		// Brief existed, spec was missing and got re-seeded (e.g. it was deleted).
+		fmt.Fprintf(stdout, "Brief %q already existed; re-seeded the missing spec at %s.\n", res.Slug, spec)
+	default:
+		// Spec existed (likely user-refined), brief was missing and got re-created.
+		fmt.Fprintf(stdout, "Spec for %q already existed and was preserved; re-created the missing brief at %s.\n",
+			res.Slug, brief)
+	}
+}
+
+// runSpecList handles `daedalus spec list`: it prints the captured briefs (slug,
+// title, whether a spec is materialized) in deterministic, slug-sorted order.
+func runSpecList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus spec list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/specs/ is listed")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus spec list [--path .]\n\n"+
+			"List the captured briefs (slug, title, and whether a spec is materialized).\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	entries, err := specs.List(specsRootFor(*dir))
+	if err != nil {
+		logger.Error("spec list failed", "phase", "list", "err", err)
+		fmt.Fprintf(stderr, "daedalus: spec list failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("specs listed", "briefs", len(entries))
+	fmt.Fprintf(stdout, "Briefs (%d):\n", len(entries))
+	for _, e := range entries {
+		specState := "no-spec"
+		if e.HasSpec {
+			specState = "spec"
+		}
+		fmt.Fprintf(stdout, "  %s\t%s\t%s\n", e.Slug, specState, e.Title)
+	}
+	return 0
+}
+
+// runSpecShow handles `daedalus spec show <slug> [--brief]`: it prints the spec's
+// file content verbatim (or the brief's, with --brief) so the user sees exactly what
+// is persisted.
+func runSpecShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus spec show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/specs/ holds the artifact")
+	brief := fs.Bool("brief", false, "show the brief (<slug>.brief.md) instead of the spec (<slug>.md)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus spec show <slug> [--brief] [--path .]\n\n"+
+			"Print the spec's file content verbatim, or the brief's with --brief.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitSpecSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !specs.IsKebabCase(slug) {
+		fmt.Fprintf(stderr, "daedalus: spec slug %q is not valid kebab-case\n", slug)
+		return 2
+	}
+
+	name := slug + specs.FileExt
+	if *brief {
+		name = slug + specs.BriefExt
+	}
+	path := filepath.Join(specsRootFor(*dir), name)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Error("spec show rejected", "phase", "read", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %s for %q not found\n", artifactWord(*brief), slug)
+			return 2
+		}
+		logger.Error("spec show failed", "phase", "read", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: spec show failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("spec shown", "slug", slug, "brief", *brief)
+	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// artifactWord names the artifact a flag selects, for human-readable messages.
+func artifactWord(brief bool) string {
+	if brief {
+		return "brief"
+	}
+	return "spec"
+}
+
+// runSpecEdit handles `daedalus spec edit <slug>`: it edits the materialized spec's
+// title and/or body in place. The edit is validated before any write, so an edit
+// that would leave the spec invalid (e.g. an empty title) is rejected with an
+// actionable error and the existing file is left intact (R4). The brief reference
+// and provenance are not editable. Writes are atomic. The brief itself is not
+// editable here: it is the human's authored input, refined outside Daedalus.
+func runSpecEdit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus spec edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/specs/ holds the spec")
+	title := fs.String("title", "", "set the spec's title")
+	body := fs.String("body", "", "set the spec's body inline")
+	bodyFile := fs.String("body-file", "", "set the spec's body from a file (takes precedence over --body)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus spec edit <slug> [flags]\n\n"+
+			"Edit the materialized spec's title or body. At least one edit flag is required.\n"+
+			"The brief reference and provenance are preserved. The edit is validated before\n"+
+			"writing; an invalid edit is rejected and the existing file is left intact. If\n"+
+			"both --body-file and --body are given, --body-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitSpecSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	spec, err := buildSpecEditSpec(fs, *title, *body, *bodyFile)
+	if err != nil {
+		logger.Error("spec edit rejected", "phase", "flags", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return 2
+	}
+	if spec.IsEmpty() {
+		fmt.Fprint(stderr, "daedalus: spec edit requires at least one edit flag (--title, --body, --body-file)\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	specsRoot := specsRootFor(*dir)
+
+	edited, err := specs.EditSpecArtifact(specsRoot, slug, spec)
+	if err != nil {
+		switch {
+		case errors.Is(err, specs.ErrSpecNotFound):
+			logger.Error("spec edit rejected", "phase", "load", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			fmt.Fprint(stderr, "the spec must already exist; capture its brief first\n")
+			return 2
+		case errors.Is(err, specs.ErrMalformed):
+			logger.Error("spec edit failed", "phase", "load", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 1
+		case isSpecInvalid(err):
+			logger.Error("spec edit rejected", "phase", "validate", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: spec %q is invalid; the edit was not applied:\n", slug)
+			writeSpecSchemaErrors(stderr, err)
+			return 2
+		default:
+			logger.Error("spec edit failed", "phase", "write", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: spec edit failed: %v\n", err)
+			return 1
+		}
+	}
+
+	logger.Info("spec edited", "slug", edited.Slug)
+	fmt.Fprintf(stdout, "Edited spec %q at %s.\n",
+		edited.Slug, filepath.ToSlash(filepath.Join(specsRoot, edited.Slug+specs.FileExt)))
+	return 0
+}
+
+// buildSpecEditSpec assembles a specs.SpecEditSpec from the parsed edit flags. It
+// uses fs.Visit to learn which flags the user actually passed, so an explicit empty
+// value (e.g. --title "") is recorded as a (rejectable) change rather than confused
+// with the flag's default. --body-file takes precedence over --body.
+func buildSpecEditSpec(fs *flag.FlagSet, title, body, bodyFile string) (specs.SpecEditSpec, error) {
+	var spec specs.SpecEditSpec
+
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	if set["title"] {
+		spec.SetTitle = true
+		spec.Title = title
+	}
+	switch {
+	case set["body-file"]:
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			return specs.SpecEditSpec{}, fmt.Errorf("reading --body-file: %w", err)
+		}
+		spec.SetBody = true
+		spec.Body = string(b)
+	case set["body"]:
+		spec.SetBody = true
+		spec.Body = body
+	}
+
+	return spec, nil
+}
+
+// runSpecRemove handles `daedalus spec remove <slug> [--brief]`: it deletes the
+// spec's file (or the brief's, with --brief) and nothing else. An absent artifact is
+// reported as an explicit error. Removing the spec leaves the brief intact and vice
+// versa, so the user can drop and re-seed one half of the pair deliberately.
+func runSpecRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus spec remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/specs/ holds the artifact")
+	brief := fs.Bool("brief", false, "remove the brief (<slug>.brief.md) instead of the spec (<slug>.md)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus spec remove <slug> [--brief] [--path .]\n\n"+
+			"Delete the spec's file from the workspace, or the brief's with --brief. Only\n"+
+			"that one file is removed; the other half of the pair is left intact.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitSpecSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !specs.IsKebabCase(slug) {
+		fmt.Fprintf(stderr, "daedalus: spec slug %q is not valid kebab-case\n", slug)
+		return 2
+	}
+
+	specsRoot := specsRootFor(*dir)
+	name := slug + specs.FileExt
+	if *brief {
+		name = slug + specs.BriefExt
+	}
+	path := filepath.Join(specsRoot, name)
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Error("spec remove rejected", "phase", "remove", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %s for %q not found\n", artifactWord(*brief), slug)
+			return 2
+		}
+		logger.Error("spec remove failed", "phase", "remove", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: spec remove failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("spec artifact removed", "slug", slug, "brief", *brief)
+	fmt.Fprintf(stdout, "Removed %s %q from %s.\n", artifactWord(*brief), slug, filepath.ToSlash(path))
+	return 0
+}
+
+// splitSpecSlug extracts the single positional spec slug from an argument list,
+// returning it plus the remaining (flag) tokens. It mirrors splitPromptID but names
+// a "spec slug" in its errors so the `spec` subcommand's usage messages read
+// correctly. Exactly one positional is required; a `--help`/`-h` token is allowed
+// without a slug so the caller's parser can show usage.
+func splitSpecSlug(args []string) (slug string, flags []string, err error) {
+	positionals, flags := splitPositionals(args)
+	for _, f := range flags {
+		if f == "-h" || f == "--help" {
+			return "", flags, nil
+		}
+	}
+	switch len(positionals) {
+	case 1:
+		return positionals[0], flags, nil
+	case 0:
+		return "", flags, errors.New("this operation requires exactly one spec slug")
+	default:
+		return "", flags, fmt.Errorf("this operation requires exactly one spec slug, got %d", len(positionals))
+	}
+}
+
+// isSpecInvalid reports whether err is (or wraps) a *specs.ValidationError — the
+// rich error the specs flows return from their pre-write gates — so the CLI detects
+// it structurally with errors.As rather than matching a message prefix.
+func isSpecInvalid(err error) bool {
+	var ve *specs.ValidationError
+	return errors.As(err, &ve)
+}
+
+// writeSpecSchemaErrors renders a specs validation failure as actionable lines, one
+// finding per line (field: observed / expected), so the user can fix every problem
+// in one pass. It falls back to the plain error text if err is not a
+// *specs.ValidationError, so it is safe to call on any error.
+func writeSpecSchemaErrors(w io.Writer, err error) {
+	var ve *specs.ValidationError
+	if !errors.As(err, &ve) {
+		fmt.Fprintf(w, "  - %v\n", err)
+		return
+	}
+	for _, se := range ve.Errors {
+		fmt.Fprintf(w, "  - %s: observed %s; expected %s\n", se.Field, se.Observed, se.Expected)
 	}
 }
 

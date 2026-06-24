@@ -21,6 +21,7 @@ index below.
 - [Managing agents](guide/managing-agents.md) — the built-in agent catalog: `daedalus agent list` and `daedalus agent add`.
 - [Managing prompts](guide/managing-prompts.md) — reusable global and shared prompts, composition, and the interactive preview: `daedalus prompt list`, `create`, `edit`, `show`, `render`, and `remove`.
 - [Managing workflows](guide/managing-workflows.md) — declarative DAG workflows, the phase schema, the seeded `sdd-default` pipeline, editing, semantic validation, and the interactive DAG view: `daedalus workflow list`, `create`, `show`, `add-phase`, `edit-phase`, `remove-phase`, `validate`, and `remove`.
+- [Managing specs](guide/managing-specs.md) — capture a brief, seed its spec at `.daedalus/specs/<slug>.md`, wire it to the *analyst* step of `sdd-default`, then generate and refine the spec yourself: `daedalus spec capture`, `list`, `show`, `edit`, and `remove`.
 - [Configuration](guide/configuration.md) — the workspace manifest, environment variables, and logging.
 
 ### Contributing
