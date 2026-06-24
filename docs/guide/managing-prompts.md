@@ -342,11 +342,154 @@ silent success:
 daedalus: prompt not found: "glossary"
 ```
 
+## Composing prompts (includes)
+
+To keep your prompts **DRY**, one prompt can pull in the content of another
+instead of copying it. A shared fragment — a glossary, a style guide, a role
+definition — lives in exactly one file and is reused **by reference**. When you
+render the prompt, Daedalus expands every reference into a single composed text.
+The source files are never modified.
+
+### The include directive
+
+To include another prompt, put an **include directive** on a line of its own in
+the body:
+
+```
+{{include: <id>}}
+```
+
+where `<id>` is the `kebab-case` id of the prompt to pull in. The rules are
+deliberately simple:
+
+- The directive must be the **only content on its line** (surrounding whitespace
+  and indentation are ignored). A line that has other text alongside the
+  `{{include: ...}}` token is **not** a directive — it is left exactly as
+  written. This lets you mention the literal token in prose without it being
+  expanded.
+- `<id>` must name a real prompt; it is matched the same way as a file name.
+
+For example, a `project-style` prompt can reuse a shared `glossary`:
+
+```markdown
+---
+id: project-style
+kind: global
+title: Project Style
+---
+Write in clear, concise English.
+
+Use the project's vocabulary consistently:
+
+{{include: glossary}}
+```
+
+The `glossary` fragment lives in its own file and can be reused by any number of
+prompts:
+
+```markdown
+---
+id: glossary
+kind: shared
+title: Project Glossary
+---
+- **Workspace**: the `.daedalus/` directory managed by Daedalus.
+- **Prompt**: a reusable piece of text under `.daedalus/prompts/`.
+```
+
+### Rendering a composed prompt
+
+`daedalus prompt show` always prints the **raw** file, with the directive left
+unresolved — it is what is stored on disk:
+
+```sh
+daedalus prompt show project-style
+```
+
+```
+---
+id: project-style
+kind: global
+title: Project Style
+---
+Write in clear, concise English.
+
+Use the project's vocabulary consistently:
+
+{{include: glossary}}
+```
+
+`daedalus prompt render` prints the **composed** prompt, with every include
+expanded in place:
+
+```sh
+daedalus prompt render project-style
+```
+
+```
+Write in clear, concise English.
+
+Use the project's vocabulary consistently:
+
+- **Workspace**: the `.daedalus/` directory managed by Daedalus.
+- **Prompt**: a reusable piece of text under `.daedalus/prompts/`.
+```
+
+Use `show` when you want to read or edit a prompt's own content, and `render`
+when you want the final assembled text.
+
+### Options
+
+| Option | Description |
+|---|---|
+| `--path <dir>` | Target repository directory whose `.daedalus/prompts/` holds the prompt. Defaults to the current directory. |
+
+### Includes are recursive and deterministic
+
+Composition is **recursive**: an included prompt can itself include others, and
+Daedalus resolves the whole chain until nothing is left to expand. It is also
+**deterministic** — rendering the same set of prompts always produces the same
+text, byte for byte — and **read-only**: `render` never rewrites your prompt
+files.
+
+### A missing reference is reported
+
+If a directive references an id that has no prompt file, Daedalus rejects the
+render and names both the missing id and the prompt that referenced it, so you
+know exactly where to look. Nothing is written:
+
+```sh
+daedalus prompt render project-style
+```
+
+```
+daedalus: included prompt "glossary" not found (referenced by "project-style")
+```
+
+### Inclusion cycles are detected
+
+If prompts include each other in a loop — for example `a` includes `b` and `b`
+includes `a` — Daedalus detects the cycle instead of looping forever. It rejects
+the render and prints the full chain so the loop is self-evident:
+
+```sh
+daedalus prompt render a
+```
+
+```
+daedalus: include cycle detected: a -> b -> a
+```
+
+A prompt that includes itself is reported the same way.
+
 ## Notes & limitations
 
 - Prompts are persisted as Markdown files under `.daedalus/prompts/`, one file
   per prompt, in a deterministic, git-friendly format. The same prompt always
   renders the same bytes.
+- Composition is **DRY** and **non-mutating**: a shared fragment lives in a
+  single file, is reused by reference, and `daedalus prompt render` resolves
+  includes in memory without ever rewriting the source files.
 - Every write operation is **non-destructive**: creating a prompt never
   overwrites an existing one, and an invalid create or edit is rejected before
   anything is written, leaving your files intact.

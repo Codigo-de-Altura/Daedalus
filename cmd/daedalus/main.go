@@ -758,6 +758,8 @@ func runPrompt(args []string, stdout, stderr io.Writer) int {
 		return runPromptEdit(args[1:], stdout, stderr)
 	case "show":
 		return runPromptShow(args[1:], stdout, stderr)
+	case "render":
+		return runPromptRender(args[1:], stdout, stderr)
 	case "remove":
 		return runPromptRemove(args[1:], stdout, stderr)
 	default:
@@ -775,6 +777,7 @@ const promptUsage = "Usage: daedalus prompt <operation> [flags]\n\n" +
 	"  create <id> --kind <k> --title <t> [flags]   create a new prompt\n" +
 	"  edit <id> [flags]             edit a prompt's title, description or body\n" +
 	"  show <id>                     print a prompt's file content verbatim (raw)\n" +
+	"  render <id>                   print the composed prompt with inclusions resolved\n" +
 	"  remove <id>                   delete a prompt's file\n\n" +
 	"Run 'daedalus prompt <operation> --help' for an operation's flags.\n"
 
@@ -1116,6 +1119,74 @@ func runPromptShow(args []string, stdout, stderr io.Writer) int {
 
 	logger.Info("prompt shown", "id", id)
 	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// runPromptRender handles `daedalus prompt render <id>`: it prints the composed
+// prompt with all inclusion directives resolved (internal/prompts.Resolve),
+// distinct from `show` which prints the raw file. Composition is read-only and
+// non-mutating (R8). Composition failures are surfaced as actionable usage errors
+// that distinguish a missing reference from a cycle (R5/R6).
+func runPromptRender(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus prompt render", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/prompts/ holds the prompt")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus prompt render <id> [--path .]\n\n"+
+			"Print the composed prompt with all {{include: <id>}} directives resolved\n"+
+			"recursively. The source files are never modified.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitPromptID(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !prompts.IsKebabCase(id) {
+		fmt.Fprintf(stderr, "daedalus: prompt id %q is not valid kebab-case\n", id)
+		return 2
+	}
+
+	composed, err := prompts.Resolve(promptsRootFor(*dir), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, prompts.ErrIncludeCycle):
+			logger.Error("prompt render rejected", "phase", "resolve", "id", id, "reason", "cycle", "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		case errors.Is(err, prompts.ErrIncludeNotFound):
+			logger.Error("prompt render rejected", "phase", "resolve", "id", id, "reason", "missing-include", "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		case errors.Is(err, prompts.ErrPromptNotFound):
+			logger.Error("prompt render rejected", "phase", "resolve", "id", id, "reason", "not-found", "err", err)
+			fmt.Fprintf(stderr, "daedalus: prompt %q not found\n", id)
+			return 2
+		case errors.Is(err, prompts.ErrMalformedPrompt):
+			logger.Error("prompt render failed", "phase", "resolve", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 1
+		default:
+			logger.Error("prompt render failed", "phase", "resolve", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: prompt render failed: %v\n", err)
+			return 1
+		}
+	}
+
+	logger.Info("prompt rendered", "id", id)
+	// A single trailing newline so the composed text is a clean line on stdout,
+	// matching how the raw `show` output ends.
+	fmt.Fprintln(stdout, composed)
 	return 0
 }
 

@@ -189,6 +189,59 @@ func TestRunPromptShow(t *testing.T) {
 	}
 }
 
+// TestRunPromptRenderComposes covers the render verb: it resolves inclusions and
+// prints the composed text (distinct from show, which is raw).
+func TestRunPromptRenderComposes(t *testing.T) {
+	dir := t.TempDir()
+	runPromptCmd("create", "glossary", "--kind", "shared", "--title", "Glossary", "--body", "Terms.", "--path", dir)
+	runPromptCmd("create", "main", "--kind", "global", "--title", "Main",
+		"--body", "Intro.\n{{include: glossary}}\nOutro.", "--path", dir)
+
+	code, stdout, stderr := runPromptCmd("render", "main", "--path", dir)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "Terms.") || strings.Contains(stdout, "{{include:") {
+		t.Errorf("render did not expand the inclusion; got:\n%s", stdout)
+	}
+
+	// `show` must still print the raw directive (unresolved).
+	_, rawOut, _ := runPromptCmd("show", "main", "--path", dir)
+	if !strings.Contains(rawOut, "{{include: glossary}}") {
+		t.Errorf("show should print the raw directive; got:\n%s", rawOut)
+	}
+}
+
+// TestRunPromptRenderCycle covers the render verb's cycle error path (exit 2).
+func TestRunPromptRenderCycle(t *testing.T) {
+	dir := t.TempDir()
+	runPromptCmd("create", "a", "--kind", "global", "--title", "A", "--body", "{{include: b}}", "--path", dir)
+	runPromptCmd("create", "b", "--kind", "shared", "--title", "B", "--body", "{{include: a}}", "--path", dir)
+
+	code, _, stderr := runPromptCmd("render", "a", "--path", dir)
+	if code != 2 {
+		t.Fatalf("cycle render exit = %d, want 2; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "cycle") {
+		t.Errorf("stderr does not name the cycle; got:\n%s", stderr)
+	}
+}
+
+// TestRunPromptRenderMissingInclude covers the render verb's missing-reference
+// error path (exit 2), naming the missing id.
+func TestRunPromptRenderMissingInclude(t *testing.T) {
+	dir := t.TempDir()
+	runPromptCmd("create", "a", "--kind", "global", "--title", "A", "--body", "{{include: ghost}}", "--path", dir)
+
+	code, _, stderr := runPromptCmd("render", "a", "--path", dir)
+	if code != 2 {
+		t.Fatalf("missing-include render exit = %d, want 2; stderr:\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "ghost") {
+		t.Errorf("stderr does not name the missing id; got:\n%s", stderr)
+	}
+}
+
 // TestRunPromptCreatePreview covers --preview: it renders the file without writing.
 func TestRunPromptCreatePreview(t *testing.T) {
 	dir := t.TempDir()
