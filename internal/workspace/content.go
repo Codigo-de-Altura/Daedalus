@@ -50,14 +50,20 @@ type convention struct {
 	Value string
 }
 
-// newManifest builds the default manifest for a target whose project name has
-// already been derived. It is pure: same name in, same manifest out, which is
-// what makes the rendered file reproducible.
-func newManifest(name string) Manifest {
+// newManifest builds the manifest for a target whose project name has already
+// been derived and whose target backends have been resolved. It is pure: same
+// name and backends in, same manifest out, which is what makes the rendered file
+// reproducible (R7/CA6). An empty backends slice falls back to the MVP default
+// so the manifest always carries at least one backend, even if a caller bypasses
+// the normalizing path.
+func newManifest(name string, backends []string) Manifest {
+	if len(backends) == 0 {
+		backends = []string{DefaultBackend}
+	}
 	return Manifest{
 		Name:     name,
 		Version:  SchemaVersion,
-		Backends: []string{DefaultBackend},
+		Backends: backends,
 		Conventions: []convention{
 			// Mirrors init.md §7 so the manifest never contradicts the documented
 			// conventions. Order here is the order rendered.
@@ -226,13 +232,14 @@ func deriveProjectName(root string) string {
 }
 
 // artifactContent returns the deterministic content for a root artifact given
-// the resolved project name. The bool reports whether the artifact has managed
-// content; unknown artifacts (none today) return false so callers create them
-// empty, preserving forward-compatibility if new root files are added.
-func artifactContent(artifact, name string) (string, bool) {
+// the resolved project name and target backends. The bool reports whether the
+// artifact has managed content; unknown artifacts (none today) return false so
+// callers create them empty, preserving forward-compatibility if new root files
+// are added. backends only affects the manifest; other artifacts ignore it.
+func artifactContent(artifact, name string, backends []string) (string, bool) {
 	switch artifact {
 	case "daedalus.yaml":
-		return renderManifest(newManifest(name)), true
+		return renderManifest(newManifest(name, backends)), true
 	case "init.md":
 		return renderInitMD(name), true
 	default:

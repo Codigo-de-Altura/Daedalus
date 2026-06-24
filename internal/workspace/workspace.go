@@ -70,6 +70,12 @@ type Plan struct {
 	// at detection time. It is the signal that distinguishes a from-scratch
 	// creation from an upgrade over an existing workspace.
 	WorkspaceExisted bool
+	// Backends are the validated, canonical target backends to record in the
+	// manifest, captured at detection time so Apply renders the same selection a
+	// preview would describe. It is always non-empty (defaulted to the MVP
+	// backend) and only ever holds supported values, because DetectWithOptions
+	// normalizes the selection before building the Plan.
+	Backends []string
 	// MissingDirs and MissingFiles are the canonical subdirectories and root
 	// artifacts that are absent and would be created by Apply, in deterministic
 	// order. Paths are workspace-relative (e.g. "agents", "init.md").
@@ -100,19 +106,51 @@ type Result struct {
 	CreatedFiles []string
 }
 
+// Options carries the optional, additive inputs that tune a detection without
+// changing the stable Detect(root) contract. A zero Options is valid and means
+// "all defaults", which is exactly what Detect uses — new knobs (e.g. backend
+// selection, ticket 01-04) go here so callers that don't need them are never
+// forced to change.
+type Options struct {
+	// Backends is the requested target backend selection, as provided by the
+	// caller (e.g. parsed from --backend). It is normalized — defaulted,
+	// validated against SupportedBackends and deduplicated — by DetectWithOptions
+	// before reaching the Plan, so an empty slice is the deterministic default
+	// and an unsupported value is rejected before anything is written.
+	Backends []string
+}
+
 // Detect inspects root and computes what the canonical `.daedalus/` structure is
 // missing, without writing anything. It is the detection half of the workflow
 // (ticket 01-02): callers use it to preview an upgrade before applying it, and
 // Apply/Create reuse it so detection logic is never duplicated. The returned
 // *Plan is a pure description; nothing is created until Plan.Apply runs.
 //
+// Detect uses default Options (the MVP backend). Callers that need to choose the
+// target backend(s) use DetectWithOptions; this signature is kept stable and
+// additive so existing callers and tests are never broken.
+func Detect(root string) (*Plan, error) {
+	return DetectWithOptions(root, Options{})
+}
+
+// DetectWithOptions is Detect with caller-supplied Options. It normalizes the
+// backend selection first — so an unsupported backend is rejected here, before
+// any filesystem inspection or write, keeping an invalid value out of the
+// manifest (R5/CA4) — then performs the same detection as Detect and records the
+// resolved backends on the Plan for Apply to persist.
+//
 // A subdirectory or root artifact is "missing" when it is absent. An entry that
 // exists but has the wrong type (e.g. a file where a directory is expected) is
 // reported as an error rather than silently planned over, because materializing
 // it would require a destructive overwrite.
-func Detect(root string) (*Plan, error) {
+func DetectWithOptions(root string, opts Options) (*Plan, error) {
+	backends, err := NormalizeBackends(opts.Backends)
+	if err != nil {
+		return nil, err
+	}
+
 	wsPath := filepath.Join(root, Name)
-	p := &Plan{Root: root, Path: wsPath, ProjectName: deriveProjectName(root)}
+	p := &Plan{Root: root, Path: wsPath, ProjectName: deriveProjectName(root), Backends: backends}
 
 	switch info, err := os.Stat(wsPath); {
 	case err == nil:
@@ -170,8 +208,10 @@ func (p *Plan) Apply() (*Result, error) {
 
 	for _, name := range p.MissingFiles {
 		// Generate deterministic content for the artifact; unknown artifacts fall
-		// back to empty so adding a new root file never silently breaks.
-		content, _ := artifactContent(name, p.ProjectName)
+		// back to empty so adding a new root file never silently breaks. The
+		// resolved backend selection flows in here so the manifest records the
+		// caller's choice (defaulted/validated at detection time).
+		content, _ := artifactContent(name, p.ProjectName, p.Backends)
 		// O_EXCL guards against a TOCTOU race: if the file appeared between Detect
 		// and Apply we skip it rather than truncate, staying non-destructive.
 		created, err := ensureFile(filepath.Join(p.Path, name), content)

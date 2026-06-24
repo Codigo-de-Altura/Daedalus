@@ -38,6 +38,7 @@ daedalus init --help
 | Option | Description |
 |---|---|
 | `--path <dir>` | Directory to initialize. Defaults to the current directory. |
+| `--backend <names>` | Target agent backend(s) to record in the manifest, comma-separated. Defaults to `claude-code`. See [Choosing a backend](#choosing-a-backend). |
 | `--preview` | Dry run: show what would be created or added without writing anything. |
 | `--help` | Show all available options. |
 
@@ -88,8 +89,10 @@ conventions:
 ```
 
 The `name` is derived automatically from the name of the directory you
-initialize. For a full description of every key and how to edit the manifest,
-see [The workspace manifest](configuration.md#the-workspace-manifest-daedalusyaml).
+initialize. The `backends` list records the target backend(s) you select with
+`--backend` (see [Choosing a backend](#choosing-a-backend)). For a full
+description of every key and how to edit the manifest, see
+[The workspace manifest](configuration.md#the-workspace-manifest-daedalusyaml).
 
 ### `init.md` — the project guideline
 
@@ -109,6 +112,48 @@ project, with these sections:
 
 Open it and replace the placeholder **Vision & purpose** section with your
 project's specifics; the rest is ready to use.
+
+## Choosing a backend
+
+A **backend** is the agent tool your AI structure will compile to. Use the
+`--backend` flag to record which backend(s) the workspace targets; the selection
+is saved to the `backends` list in the manifest (see
+[The workspace manifest](configuration.md#the-workspace-manifest-daedalusyaml)).
+
+If you do not pass `--backend`, `init` records the default backend,
+`claude-code`:
+
+```sh
+daedalus init                       # records: claude-code (the default)
+daedalus init --backend claude-code # same result, stated explicitly
+```
+
+```yaml
+backends:
+  - claude-code
+```
+
+The MVP supports exactly one backend, **`claude-code`**, which is also the
+default. The flag accepts a comma-separated list so the manifest is ready for
+multiple backends in the future. Surrounding whitespace is trimmed and repeated
+entries are collapsed, so `--backend claude-code, claude-code` records a single
+`claude-code` entry.
+
+### Unsupported backends
+
+If you request a backend that is not supported, `init` rejects the run with a
+clear error, exits with status code `2`, and **writes nothing** — no `.daedalus/`
+directory is created and no invalid value is recorded:
+
+```sh
+daedalus init --backend foo
+```
+
+```
+daedalus: unsupported backend: "foo" (supported: claude-code)
+```
+
+Re-run the command with a supported backend (or no `--backend` flag) to proceed.
 
 ## Safe to run on existing repositories
 

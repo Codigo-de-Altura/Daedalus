@@ -93,6 +93,8 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	dir := fs.String("path", ".", "target repository directory in which to create the .daedalus/ workspace")
 	preview := fs.Bool("preview", false, "show the changes that would be made without writing anything (dry run)")
+	backend := fs.String("backend", "", "target agent backend(s) to record in the manifest, comma-separated "+
+		"(default: claude-code; MVP supports: claude-code)")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, "Usage: daedalus init [flags]\n\n"+
 			"Create the canonical .daedalus/ workspace in the target repository.\n"+
@@ -109,9 +111,20 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 
 	logger := logging.New(stderr)
 
+	// Resolve and validate the backend selection BEFORE any filesystem access so
+	// an unsupported backend can never leave a partial or invalid workspace
+	// behind (R5/CA4). An empty --backend resolves to the deterministic default.
+	backends, err := workspace.NormalizeBackends(splitBackends(*backend))
+	if err != nil {
+		logger.Error("init rejected", "phase", "backend-selection", "requested", *backend, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return 2
+	}
+	logger.Info("backend selection resolved", "backends", strings.Join(backends, ","))
+
 	// Detect first so we can decide between create/upgrade and render a preview
 	// of the proposed changes before touching the filesystem.
-	plan, err := workspace.Detect(*dir)
+	plan, err := workspace.DetectWithOptions(*dir, workspace.Options{Backends: backends})
 	if err != nil {
 		logger.Error("init failed", "phase", "detect", "err", err)
 		fmt.Fprintf(stderr, "daedalus: init failed: %v\n", err)
@@ -191,6 +204,27 @@ func writeResult(stdout io.Writer, res *workspace.Result) {
 	default:
 		fmt.Fprintf(stdout, "Created Daedalus workspace at %s from scratch.\n", res.Path)
 	}
+}
+
+// splitBackends turns the raw --backend flag value into a selection slice for
+// workspace.NormalizeBackends. It splits on commas to leave the door open to
+// multi-backend selection (--backend a,b) even though the MVP supports a single
+// backend, and trims surrounding whitespace so "a, b" and "a,b" behave the same.
+// An empty (or whitespace-only) flag yields a nil slice, which NormalizeBackends
+// reads as "use the default". Blank entries (e.g. a trailing comma) are dropped
+// so they never reach validation as an empty, unsupported backend.
+func splitBackends(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // plural picks the singular or plural suffix for n, keeping result messages

@@ -38,7 +38,7 @@ conventions:
 |---|---|
 | `name` | The project name. Derived automatically from the name of the target directory (the folder you initialize). |
 | `version` | The Daedalus **workspace schema** version — the version of the `.daedalus/` layout and manifest format. It is currently `"1"`. This is not the version of the Daedalus binary; the two evolve independently. |
-| `backends` | The list of target agent backend(s) your AI structure compiles to. A fresh manifest contains a single default entry, `claude-code`. |
+| `backends` | The list of target agent backend(s) your AI structure compiles to. A fresh manifest contains a single default entry, `claude-code`. Set it at init time with `daedalus init --backend` — see [Choosing a backend](initializing-a-workspace.md#choosing-a-backend). |
 | `conventions` | The project conventions, as a nested mapping. See below. |
 
 The `conventions` block records the conventions Daedalus follows for your
