@@ -82,7 +82,16 @@ func runDefault(args []string) int {
 		return 0
 	}
 
-	if _, err := tea.NewProgram(tui.New()).Run(); err != nil {
+	// The TUI browses the current directory's `.daedalus/prompts/`. We resolve the
+	// working directory here (falling back to "." if it cannot be determined) so the
+	// presentation layer is handed an explicit root rather than reaching for the
+	// process state itself.
+	workdir, err := os.Getwd()
+	if err != nil {
+		workdir = "."
+	}
+
+	if _, err := tea.NewProgram(tui.New(workdir), tea.WithAltScreen()).Run(); err != nil {
 		logger.Error("tui exited with error", "err", err)
 		return 1
 	}

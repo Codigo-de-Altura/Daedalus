@@ -482,6 +482,85 @@ daedalus: include cycle detected: a -> b -> a
 
 A prompt that includes itself is reported the same way.
 
+## Previewing prompts in the interface
+
+Besides the commands above, Daedalus has an interactive terminal interface for
+**browsing and previewing** your prompts. The preview shows a prompt's fully
+**composed** text — every `{{include: ...}}` already resolved — rendered as
+Markdown, so you see exactly what the final prompt looks like. The interface is
+**read-only**: it never edits or saves a prompt.
+
+### Opening the prompt browser
+
+Run `daedalus` with no subcommand in an interactive terminal:
+
+```sh
+daedalus
+```
+
+It opens on the **prompt list**, showing every prompt in the current directory's
+`.daedalus/prompts/` with its id, kind, and title:
+
+```
+Daedalus · Prompts
+
+  glossary  [shared]  Project Glossary
+  project-style  [global]  Project Style
+```
+
+> The browser reads the `.daedalus/prompts/` of the directory you launch it
+> from, so run it from inside your project.
+
+### Browsing the list
+
+| Key | Action |
+|---|---|
+| `↑` / `k` | Move the selection up. |
+| `↓` / `j` | Move the selection down. |
+| `enter` / `l` | Open the preview for the selected prompt. |
+| `?` | Toggle the help footer (short ↔ full). |
+| `q` / `Ctrl+C` | Quit. |
+
+### Reading the preview
+
+Press `enter` on a prompt to open its preview. Daedalus composes the prompt and
+renders the result as Markdown — headings, lists, emphasis, and code blocks are
+formatted for the terminal. A header names the prompt, and a hint at the bottom
+shows your scroll position through long content.
+
+In the preview:
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Scroll one line. |
+| `pgup` / `pgdn` | Scroll one page (also `b` / `f` / `space`). |
+| `g` / `G` | Jump to the top / bottom. |
+| `esc` | Return to the list. |
+| `?` | Toggle the help footer. |
+| `Ctrl+C` | Quit. |
+
+`esc` is the way back to the list; inside the preview, `q` is reserved so you do
+not leave the app by accident while reading. The preview never changes the
+prompt — to edit it, use `daedalus prompt edit` (above).
+
+### Empty and error states
+
+If the directory has no prompts, the list says so and points you to the next
+step instead of showing an empty screen:
+
+```
+No prompts found.
+
+Create one with `daedalus prompt create`, or run `daedalus init`
+if this directory is not a Daedalus workspace yet.
+```
+
+If a prompt cannot be composed — for example it has an inclusion cycle or
+references a prompt that does not exist — the preview shows a readable error
+message instead of broken content, and the app keeps running. Return to the list
+with `esc`, fix the prompt with `daedalus prompt edit`, and open the preview
+again.
+
 ## Notes & limitations
 
 - Prompts are persisted as Markdown files under `.daedalus/prompts/`, one file

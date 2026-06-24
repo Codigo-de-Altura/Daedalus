@@ -13,9 +13,12 @@ In an interactive terminal:
 ./daedalus
 ```
 
-At this stage the interface is a minimal skeleton that proves the application
-starts and stops cleanly; product screens arrive in later versions. You will see
-a short welcome view with a help line at the bottom.
+The interface opens on the **prompt browser**, which lists the prompts in the
+current directory's workspace and lets you preview any of them as composed,
+rendered Markdown. See
+[Previewing prompts in the interface](managing-prompts.md#previewing-prompts-in-the-interface)
+for the full walkthrough and keyboard shortcuts. A help line at the bottom shows
+the keys available on the current screen.
 
 ### Quitting
 
