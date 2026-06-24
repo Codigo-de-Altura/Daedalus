@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -84,14 +85,19 @@ func runDefault(args []string) int {
 }
 
 // runInit handles `daedalus init`: it scaffolds the canonical `.daedalus/`
-// workspace in the target directory (default: the current directory).
+// workspace in the target directory (default: the current directory). When a
+// workspace already exists the run becomes a non-destructive upgrade that only
+// adds the missing pieces; --preview reports what would change without writing.
 func runInit(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("daedalus init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dir := fs.String("path", ".", "target repository directory in which to create the .daedalus/ workspace")
+	preview := fs.Bool("preview", false, "show the changes that would be made without writing anything (dry run)")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, "Usage: daedalus init [flags]\n\n"+
-			"Create the canonical .daedalus/ workspace in the target repository.\n\nFlags:\n")
+			"Create the canonical .daedalus/ workspace in the target repository.\n"+
+			"If a workspace already exists, init performs a non-destructive upgrade,\n"+
+			"adding only the missing directories and root artifacts.\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -102,9 +108,39 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	}
 
 	logger := logging.New(stderr)
-	res, err := workspace.Create(*dir)
+
+	// Detect first so we can decide between create/upgrade and render a preview
+	// of the proposed changes before touching the filesystem.
+	plan, err := workspace.Detect(*dir)
 	if err != nil {
-		logger.Error("init failed", "err", err)
+		logger.Error("init failed", "phase", "detect", "err", err)
+		fmt.Fprintf(stderr, "daedalus: init failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("workspace detected",
+		"path", plan.Path,
+		"workspace_existed", plan.WorkspaceExisted,
+		"missing_dirs", len(plan.MissingDirs),
+		"missing_files", len(plan.MissingFiles))
+
+	// Preview mode (--preview): report the plan and stop before any write so a
+	// non-interactive validator can inspect the proposed changes safely.
+	if *preview {
+		writePreview(stdout, plan)
+		logger.Info("init preview only", "applied", false)
+		return 0
+	}
+
+	// In upgrade mode, always surface what will be added before applying it, so
+	// the write is never a surprise (RNF-8 preview/confirm).
+	if plan.WorkspaceExisted && !plan.IsEmpty() {
+		writePreview(stdout, plan)
+	}
+
+	res, err := plan.Apply()
+	if err != nil {
+		logger.Error("init failed", "phase", "apply", "err", err)
 		fmt.Fprintf(stderr, "daedalus: init failed: %v\n", err)
 		return 1
 	}
@@ -115,12 +151,55 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		"created_dirs", len(res.CreatedDirs),
 		"created_files", len(res.CreatedFiles))
 
-	if res.AlreadyExisted && len(res.CreatedDirs) == 0 && len(res.CreatedFiles) == 0 {
-		fmt.Fprintf(stdout, "Daedalus workspace already present at %s — nothing to create.\n", res.Path)
-	} else {
-		fmt.Fprintf(stdout, "Created Daedalus workspace at %s\n", res.Path)
-	}
+	writeResult(stdout, res)
 	return 0
+}
+
+// writePreview renders, on stdout, the directories and root artifacts a plan
+// would create. It lists nothing for an already-complete workspace so an
+// idempotent re-run produces an explicit "nothing to update" preview.
+func writePreview(stdout io.Writer, plan *workspace.Plan) {
+	if plan.IsEmpty() {
+		fmt.Fprintf(stdout, "Existing Daedalus workspace at %s is already complete — nothing to update.\n",
+			plan.Path)
+		return
+	}
+
+	fmt.Fprintf(stdout, "Preview of changes to the Daedalus workspace at %s:\n", plan.Path)
+	for _, dir := range plan.MissingDirs {
+		// filepath.ToSlash keeps the preview identical across Windows and Unix.
+		fmt.Fprintf(stdout, "  + %s%s (directory)\n", filepath.ToSlash(dir), "/")
+	}
+	for _, file := range plan.MissingFiles {
+		fmt.Fprintf(stdout, "  + %s (file)\n", filepath.ToSlash(file))
+	}
+}
+
+// writeResult reports the outcome of an applied init, choosing wording that
+// unambiguously distinguishes a from-scratch creation from an upgrade over an
+// existing workspace (R7/CA6).
+func writeResult(stdout io.Writer, res *workspace.Result) {
+	switch {
+	case res.AlreadyExisted && len(res.CreatedDirs) == 0 && len(res.CreatedFiles) == 0:
+		fmt.Fprintf(stdout, "Existing Daedalus workspace at %s is already complete — nothing to update.\n",
+			res.Path)
+	case res.AlreadyExisted:
+		fmt.Fprintf(stdout, "Upgraded existing Daedalus workspace at %s (added %d director%s, %d file%s).\n",
+			res.Path,
+			len(res.CreatedDirs), plural(len(res.CreatedDirs), "y", "ies"),
+			len(res.CreatedFiles), plural(len(res.CreatedFiles), "", "s"))
+	default:
+		fmt.Fprintf(stdout, "Created Daedalus workspace at %s from scratch.\n", res.Path)
+	}
+}
+
+// plural picks the singular or plural suffix for n, keeping result messages
+// grammatical without pulling in a dependency.
+func plural(n int, singular, pluralSuffix string) string {
+	if n == 1 {
+		return singular
+	}
+	return pluralSuffix
 }
 
 // isInteractive reports whether both stdin and stdout are connected to a
