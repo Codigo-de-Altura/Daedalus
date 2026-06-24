@@ -19,6 +19,7 @@ index below.
 - [Command line](guide/command-line.md) — running Daedalus, the interface, version, and help.
 - [Initializing a workspace](guide/initializing-a-workspace.md) — `daedalus init`, the `.daedalus/` workspace, and its root artifacts.
 - [Managing agents](guide/managing-agents.md) — the built-in agent catalog: `daedalus agent list` and `daedalus agent add`.
+- [Managing prompts](guide/managing-prompts.md) — reusable global and shared prompts, composition, and the interactive preview: `daedalus prompt list`, `create`, `edit`, `show`, `render`, and `remove`.
 - [Configuration](guide/configuration.md) — the workspace manifest, environment variables, and logging.
 
 ### Contributing

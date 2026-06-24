@@ -23,6 +23,7 @@ import (
 	"github.com/Codigo-de-Altura/Daedalus/internal/buildinfo"
 	"github.com/Codigo-de-Altura/Daedalus/internal/catalog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
+	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
 	"github.com/Codigo-de-Altura/Daedalus/internal/tui"
 	"github.com/Codigo-de-Altura/Daedalus/internal/workspace"
 )
@@ -41,6 +42,8 @@ func run(args []string) int {
 			return runInit(args[1:], os.Stdout, os.Stderr)
 		case "agent":
 			return runAgent(args[1:], os.Stdout, os.Stderr)
+		case "prompt":
+			return runPrompt(args[1:], os.Stdout, os.Stderr)
 		default:
 			fmt.Fprintf(os.Stderr, "daedalus: unknown command %q\nrun 'daedalus --help' for usage\n", args[0])
 			return 2
@@ -79,7 +82,16 @@ func runDefault(args []string) int {
 		return 0
 	}
 
-	if _, err := tea.NewProgram(tui.New()).Run(); err != nil {
+	// The TUI browses the current directory's `.daedalus/prompts/`. We resolve the
+	// working directory here (falling back to "." if it cannot be determined) so the
+	// presentation layer is handed an explicit root rather than reaching for the
+	// process state itself.
+	workdir, err := os.Getwd()
+	if err != nil {
+		workdir = "."
+	}
+
+	if _, err := tea.NewProgram(tui.New(workdir), tea.WithAltScreen()).Run(); err != nil {
 		logger.Error("tui exited with error", "err", err)
 		return 1
 	}
@@ -735,6 +747,531 @@ func writeImportResult(stdout, stderr io.Writer, outcomes []catalog.ImportOutcom
 	return 0
 }
 
+// runPrompt handles the `daedalus prompt` subcommand, a thin CLI surface over the
+// prompts domain (internal/prompts). It dispatches to the operation named by the
+// next argument so the verb set can grow without reshaping run(): list, create,
+// edit, show, remove. It keeps the same conventions as runAgent — own usage, exit
+// code 2 for usage errors, logging to stderr — so the CLI feels uniform.
+func runPrompt(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, promptUsage)
+		return 2
+	}
+
+	switch args[0] {
+	case "list":
+		return runPromptList(args[1:], stdout, stderr)
+	case "create":
+		return runPromptCreate(args[1:], stdout, stderr)
+	case "edit":
+		return runPromptEdit(args[1:], stdout, stderr)
+	case "show":
+		return runPromptShow(args[1:], stdout, stderr)
+	case "render":
+		return runPromptRender(args[1:], stdout, stderr)
+	case "remove":
+		return runPromptRemove(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown prompt operation %q\n\n%s", args[0], promptUsage)
+		return 2
+	}
+}
+
+// promptUsage is the shared help text for the `prompt` subcommand, surfaced when
+// no operation (or an unknown one) is given.
+const promptUsage = "Usage: daedalus prompt <operation> [flags]\n\n" +
+	"Work with reusable global and shared prompts in .daedalus/prompts/.\n\n" +
+	"Operations:\n" +
+	"  list [--kind global|shared]   list persisted prompts (id, kind, title)\n" +
+	"  create <id> --kind <k> --title <t> [flags]   create a new prompt\n" +
+	"  edit <id> [flags]             edit a prompt's title, description or body\n" +
+	"  show <id>                     print a prompt's file content verbatim (raw)\n" +
+	"  render <id>                   print the composed prompt with inclusions resolved\n" +
+	"  remove <id>                   delete a prompt's file\n\n" +
+	"Run 'daedalus prompt <operation> --help' for an operation's flags.\n"
+
+// promptsRootFor builds the canonical `.daedalus/prompts/` directory under dir so
+// a prompt lands exactly where init scaffolds the prompts/ directory. Built here
+// rather than in the prompts package so that package stays free of the
+// workspace-location convention (mirrors how agentsRoot is derived).
+func promptsRootFor(dir string) string {
+	return filepath.Join(dir, workspace.Name, prompts.PromptsDir)
+}
+
+// runPromptList handles `daedalus prompt list [--kind global|shared]`: it prints
+// the persisted prompts (id, kind, title) in deterministic, id-sorted order,
+// optionally filtered by kind.
+func runPromptList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus prompt list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/prompts/ is listed")
+	kind := fs.String("kind", "", "filter by kind: global or shared (default: all)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus prompt list [--kind global|shared] [--path .]\n\n"+
+			"List the persisted prompts (id, kind, title), optionally filtered by kind.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	filter, err := parseKindFilter(*kind)
+	if err != nil {
+		logger.Error("prompt list rejected", "phase", "flags", "kind", *kind, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return 2
+	}
+
+	entries, err := prompts.List(promptsRootFor(*dir), filter)
+	if err != nil {
+		logger.Error("prompt list failed", "phase", "list", "err", err)
+		fmt.Fprintf(stderr, "daedalus: prompt list failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("prompts listed", "prompts", len(entries), "filter", *kind)
+
+	if *kind != "" {
+		fmt.Fprintf(stdout, "Prompts (%d, kind=%s):\n", len(entries), filter)
+	} else {
+		fmt.Fprintf(stdout, "Prompts (%d):\n", len(entries))
+	}
+	for _, e := range entries {
+		fmt.Fprintf(stdout, "  %s\t%s\t%s\n", e.ID, e.Kind, e.Title)
+	}
+	return 0
+}
+
+// parseKindFilter validates the --kind flag value into a prompts.Kind, treating
+// an empty value as "no filter". An unknown value is a usage error so a typo like
+// `--kind globl` is caught instead of silently returning everything.
+func parseKindFilter(raw string) (prompts.Kind, error) {
+	switch raw {
+	case "":
+		return "", nil
+	case string(prompts.KindGlobal):
+		return prompts.KindGlobal, nil
+	case string(prompts.KindShared):
+		return prompts.KindShared, nil
+	default:
+		return "", fmt.Errorf("invalid --kind %q: expected %s or %s", raw, prompts.KindGlobal, prompts.KindShared)
+	}
+}
+
+// runPromptCreate handles `daedalus prompt create <id> --kind <k> --title <t>`:
+// it creates a new prompt under .daedalus/prompts/. The prompt is validated before
+// any write, so an invalid id/kind/title is rejected with an actionable error and
+// nothing is written. It is non-destructive — a duplicate id is reported as a
+// conflict, not overwritten (R4/R8) — and --preview reports the file that would be
+// created without writing anything.
+func runPromptCreate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus prompt create", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/prompts/ the prompt is added to")
+	kind := fs.String("kind", "", "prompt kind: global or shared (required)")
+	title := fs.String("title", "", "prompt title (required)")
+	description := fs.String("description", "", "optional one-line description")
+	body := fs.String("body", "", "prompt body inline")
+	bodyFile := fs.String("body-file", "", "prompt body from a file (takes precedence over --body)")
+	preview := fs.Bool("preview", false, "show the file that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus prompt create <id> --kind <global|shared> --title <t> [flags]\n\n"+
+			"Create a new reusable prompt in the target workspace's .daedalus/prompts/\n"+
+			"directory as <id>.md. If the prompt already exists it is not overwritten.\n"+
+			"If both --body-file and --body are given, --body-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitPromptID(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	// Resolve the body: --body-file wins over --body so a caller can keep a long
+	// prompt in a file without it being shadowed by an accidental inline one.
+	bodyText := *body
+	if *bodyFile != "" {
+		b, err := os.ReadFile(*bodyFile)
+		if err != nil {
+			logger.Error("prompt create rejected", "phase", "flags", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return 2
+		}
+		bodyText = string(b)
+	}
+
+	p := prompts.Prompt{
+		ID:          id,
+		Kind:        prompts.Kind(*kind),
+		Title:       *title,
+		Description: *description,
+		Body:        bodyText,
+	}
+
+	promptsRoot := promptsRootFor(*dir)
+
+	// Plan first: this validates the prompt and renders the content without touching
+	// the filesystem, so an invalid prompt fails as a usage error before any write
+	// or preview.
+	plan, err := prompts.PlanCreate(promptsRoot, p)
+	if err != nil {
+		logger.Error("prompt create rejected", "phase", "plan", "id", id, "err", err)
+		if isPromptInvalid(err) {
+			fmt.Fprintf(stderr, "daedalus: prompt %q is invalid; it was not created:\n", id)
+			writePromptSchemaErrors(stderr, err)
+		} else {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		}
+		return 2
+	}
+
+	logger.Info("prompt create planned", "id", plan.Prompt.ID, "kind", plan.Prompt.Kind, "path", plan.Path)
+
+	if *preview {
+		fmt.Fprintf(stdout, "Preview of creating prompt %q (%s) at %s:\n",
+			plan.Prompt.ID, plan.Prompt.Kind, filepath.ToSlash(plan.Path))
+		fmt.Fprint(stdout, plan.Content)
+		logger.Info("prompt create preview only", "id", plan.Prompt.ID, "applied", false)
+		return 0
+	}
+
+	if err := plan.Apply(); err != nil {
+		if errors.Is(err, prompts.ErrPromptExists) {
+			logger.Error("prompt create rejected", "phase", "apply", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v — not overwritten\n", err)
+			return 2
+		}
+		logger.Error("prompt create failed", "phase", "apply", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: prompt create failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("prompt created", "id", plan.Prompt.ID, "kind", plan.Prompt.Kind)
+	fmt.Fprintf(stdout, "Created prompt %q (%s) at %s.\n",
+		plan.Prompt.ID, plan.Prompt.Kind, filepath.ToSlash(plan.Path))
+	return 0
+}
+
+// runPromptEdit handles `daedalus prompt edit <id>`: it edits a prompt's title,
+// description and/or body in place. The edit is validated before any write, so an
+// edit that would leave the prompt invalid (e.g. an empty title) is rejected with
+// an actionable error and the existing file is left intact (R5). Writes are atomic.
+func runPromptEdit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus prompt edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/prompts/ holds the prompt")
+	title := fs.String("title", "", "set the prompt's title")
+	description := fs.String("description", "", "set the prompt's description (empty clears it)")
+	body := fs.String("body", "", "set the prompt's body inline")
+	bodyFile := fs.String("body-file", "", "set the prompt's body from a file (takes precedence over --body)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus prompt edit <id> [flags]\n\n"+
+			"Edit a prompt's title, description or body. At least one edit flag is\n"+
+			"required. The edit is validated before writing; an invalid edit is rejected\n"+
+			"and the existing file is left intact. If both --body-file and --body are\n"+
+			"given, --body-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitPromptID(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	spec, err := buildPromptEditSpec(fs, *title, *description, *body, *bodyFile)
+	if err != nil {
+		logger.Error("prompt edit rejected", "phase", "flags", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return 2
+	}
+	if spec.IsEmpty() {
+		fmt.Fprint(stderr, "daedalus: prompt edit requires at least one edit flag "+
+			"(--title, --description, --body, --body-file)\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	promptsRoot := promptsRootFor(*dir)
+
+	edited, err := prompts.Edit(promptsRoot, id, spec)
+	if err != nil {
+		switch {
+		case errors.Is(err, prompts.ErrPromptNotFound):
+			logger.Error("prompt edit rejected", "phase", "load", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			fmt.Fprint(stderr, "the prompt must already exist; create it first\n")
+			return 2
+		case errors.Is(err, prompts.ErrMalformedPrompt):
+			logger.Error("prompt edit failed", "phase", "load", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 1
+		case isPromptInvalid(err):
+			logger.Error("prompt edit rejected", "phase", "validate", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: prompt %q is invalid; the edit was not applied:\n", id)
+			writePromptSchemaErrors(stderr, err)
+			return 2
+		default:
+			logger.Error("prompt edit failed", "phase", "write", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: prompt edit failed: %v\n", err)
+			return 1
+		}
+	}
+
+	logger.Info("prompt edited", "id", edited.ID, "kind", edited.Kind)
+	fmt.Fprintf(stdout, "Edited prompt %q at %s.\n",
+		edited.ID, filepath.ToSlash(filepath.Join(promptsRoot, edited.ID+prompts.FileExt)))
+	return 0
+}
+
+// buildPromptEditSpec assembles a prompts.EditSpec from the parsed edit flags. It
+// uses fs.Visit to learn which flags the user actually passed, so an explicit
+// empty value (e.g. --title "") is recorded as a (rejectable) change rather than
+// confused with the flag's default. --body-file takes precedence over --body.
+func buildPromptEditSpec(fs *flag.FlagSet, title, description, body, bodyFile string) (prompts.EditSpec, error) {
+	var spec prompts.EditSpec
+
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	if set["title"] {
+		spec.SetTitle = true
+		spec.Title = title
+	}
+	if set["description"] {
+		spec.SetDescription = true
+		spec.Description = description
+	}
+	// Body precedence: --body-file wins over --body so a caller can keep a long
+	// body in a file without it being shadowed by an accidental inline one.
+	switch {
+	case set["body-file"]:
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			return prompts.EditSpec{}, fmt.Errorf("reading --body-file: %w", err)
+		}
+		spec.SetBody = true
+		spec.Body = string(b)
+	case set["body"]:
+		spec.SetBody = true
+		spec.Body = body
+	}
+
+	return spec, nil
+}
+
+// runPromptShow handles `daedalus prompt show <id>`: it prints the prompt's file
+// content verbatim to stdout, so the user sees exactly what is persisted.
+func runPromptShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus prompt show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/prompts/ holds the prompt")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus prompt show <id> [--path .]\n\n"+
+			"Print the prompt's file content verbatim.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitPromptID(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !prompts.IsKebabCase(id) {
+		fmt.Fprintf(stderr, "daedalus: prompt id %q is not valid kebab-case\n", id)
+		return 2
+	}
+
+	path := filepath.Join(promptsRootFor(*dir), id+prompts.FileExt)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Error("prompt show rejected", "phase", "read", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: prompt %q not found\n", id)
+			return 2
+		}
+		logger.Error("prompt show failed", "phase", "read", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: prompt show failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("prompt shown", "id", id)
+	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// runPromptRender handles `daedalus prompt render <id>`: it prints the composed
+// prompt with all inclusion directives resolved (internal/prompts.Resolve),
+// distinct from `show` which prints the raw file. Composition is read-only and
+// non-mutating (R8). Composition failures are surfaced as actionable usage errors
+// that distinguish a missing reference from a cycle (R5/R6).
+func runPromptRender(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus prompt render", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/prompts/ holds the prompt")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus prompt render <id> [--path .]\n\n"+
+			"Print the composed prompt with all {{include: <id>}} directives resolved\n"+
+			"recursively. The source files are never modified.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitPromptID(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !prompts.IsKebabCase(id) {
+		fmt.Fprintf(stderr, "daedalus: prompt id %q is not valid kebab-case\n", id)
+		return 2
+	}
+
+	composed, err := prompts.Resolve(promptsRootFor(*dir), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, prompts.ErrIncludeCycle):
+			logger.Error("prompt render rejected", "phase", "resolve", "id", id, "reason", "cycle", "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		case errors.Is(err, prompts.ErrIncludeNotFound):
+			logger.Error("prompt render rejected", "phase", "resolve", "id", id, "reason", "missing-include", "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		case errors.Is(err, prompts.ErrPromptNotFound):
+			logger.Error("prompt render rejected", "phase", "resolve", "id", id, "reason", "not-found", "err", err)
+			fmt.Fprintf(stderr, "daedalus: prompt %q not found\n", id)
+			return 2
+		case errors.Is(err, prompts.ErrMalformedPrompt):
+			logger.Error("prompt render failed", "phase", "resolve", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 1
+		default:
+			logger.Error("prompt render failed", "phase", "resolve", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: prompt render failed: %v\n", err)
+			return 1
+		}
+	}
+
+	logger.Info("prompt rendered", "id", id)
+	// A single trailing newline so the composed text is a clean line on stdout,
+	// matching how the raw `show` output ends.
+	fmt.Fprintln(stdout, composed)
+	return 0
+}
+
+// runPromptRemove handles `daedalus prompt remove <id>`: it deletes the prompt's
+// file and nothing else. An absent prompt is reported as an explicit error (R8).
+func runPromptRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus prompt remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/prompts/ holds the prompt")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus prompt remove <id> [--path .]\n\n"+
+			"Delete a prompt's file from the workspace. Only that file is removed.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitPromptID(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	promptsRoot := promptsRootFor(*dir)
+
+	if err := prompts.Remove(promptsRoot, id); err != nil {
+		if errors.Is(err, prompts.ErrPromptNotFound) {
+			logger.Error("prompt remove rejected", "phase", "remove", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		}
+		// A malformed (non-kebab-case) id is also a usage error.
+		if !prompts.IsKebabCase(id) {
+			logger.Error("prompt remove rejected", "phase", "remove", "id", id, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		}
+		logger.Error("prompt remove failed", "phase", "remove", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: prompt remove failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("prompt removed", "id", id)
+	fmt.Fprintf(stdout, "Removed prompt %q from %s.\n",
+		id, filepath.ToSlash(filepath.Join(promptsRoot, id+prompts.FileExt)))
+	return 0
+}
+
+// isPromptInvalid reports whether err is (or wraps) a *prompts.ValidationError —
+// the rich error the prompts flows return from their pre-write gates — so the CLI
+// detects it structurally with errors.As rather than matching a message prefix.
+func isPromptInvalid(err error) bool {
+	var ve *prompts.ValidationError
+	return errors.As(err, &ve)
+}
+
+// writePromptSchemaErrors renders a prompt validation failure as actionable lines,
+// one finding per line (field: observed / expected), so the user can fix every
+// problem in one pass (R8). It falls back to the plain error text if err is not a
+// *prompts.ValidationError, so it is safe to call on any error.
+func writePromptSchemaErrors(w io.Writer, err error) {
+	var ve *prompts.ValidationError
+	if !errors.As(err, &ve) {
+		fmt.Fprintf(w, "  - %v\n", err)
+		return
+	}
+	for _, se := range ve.Errors {
+		fmt.Fprintf(w, "  - %s: observed %s; expected %s\n", se.Field, se.Observed, se.Expected)
+	}
+}
+
 // writePreview renders, on stdout, the directories and root artifacts a plan
 // would create. It lists nothing for an already-complete workspace so an
 // idempotent re-run produces an explicit "nothing to update" preview.
@@ -808,6 +1345,14 @@ var valueFlags = map[string]struct{}{
 	"-prompt-file": {}, "--prompt-file": {},
 	"-set-param": {}, "--set-param": {},
 	"-remove-param": {}, "--remove-param": {},
+	// prompt-subcommand value flags. Listed here too because the `prompt` and
+	// `agent` subcommands share splitPositionals; over-listing is harmless since a
+	// flag a given operation does not define simply never appears in its args.
+	"-kind": {}, "--kind": {},
+	"-title": {}, "--title": {},
+	"-description": {}, "--description": {},
+	"-body": {}, "--body": {},
+	"-body-file": {}, "--body-file": {},
 }
 
 // splitPositionals separates the positional tokens from the flag tokens in an
@@ -863,6 +1408,28 @@ func splitAgentID(args []string) (id string, flags []string, err error) {
 		return "", flags, errors.New("this operation requires exactly one agent id")
 	default:
 		return "", flags, fmt.Errorf("this operation requires exactly one agent id, got %d", len(positionals))
+	}
+}
+
+// splitPromptID extracts the single positional prompt id from an argument list,
+// returning it plus the remaining (flag) tokens. It mirrors splitAgentID but
+// names a "prompt id" in its errors so the `prompt` subcommand's usage messages
+// read correctly. Exactly one positional is required; a `--help`/`-h` token is
+// allowed without an id so the caller's parser can show usage.
+func splitPromptID(args []string) (id string, flags []string, err error) {
+	positionals, flags := splitPositionals(args)
+	for _, f := range flags {
+		if f == "-h" || f == "--help" {
+			return "", flags, nil
+		}
+	}
+	switch len(positionals) {
+	case 1:
+		return positionals[0], flags, nil
+	case 0:
+		return "", flags, errors.New("this operation requires exactly one prompt id")
+	default:
+		return "", flags, fmt.Errorf("this operation requires exactly one prompt id, got %d", len(positionals))
 	}
 }
 
