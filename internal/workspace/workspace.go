@@ -3,10 +3,10 @@
 // project's AI structure (agents, prompts, workflows, SDD backlog).
 //
 // This package owns the *scaffolding* of the workspace: the deterministic
-// directory tree and the root artifact files. The deterministic *content* of
-// those artifacts (daedalus.yaml, init.md) belongs to a later ticket; here they
-// are created empty when missing so the structure is complete. All operations
-// are non-destructive: existing files are never truncated or removed.
+// directory tree and the root artifact files, including their deterministic
+// *content* (the daedalus.yaml manifest and the base init.md, see content.go).
+// All operations are non-destructive: existing files are never truncated or
+// removed, so manually edited artifacts survive a re-run untouched.
 //
 // Detection is separated from writing. Plan inspects a target and computes what
 // the canonical structure is missing without touching the filesystem, so a
@@ -41,9 +41,10 @@ var Subdirs = []string{
 	".state",
 }
 
-// RootArtifacts are the files placed at the root of the workspace. Their
-// deterministic content is produced by a later ticket; this package only
-// guarantees their existence as part of the scaffolding.
+// RootArtifacts are the files placed at the root of the workspace, in fixed
+// deterministic order. Their content is generated deterministically from the
+// target (see content.go / artifactContent); this package guarantees both their
+// existence and their initial content as part of the scaffolding.
 var RootArtifacts = []string{
 	"daedalus.yaml",
 	"init.md",
@@ -60,10 +61,21 @@ type Plan struct {
 	Root string
 	// Path is the workspace path (`<root>/.daedalus`).
 	Path string
+	// ProjectName is the deterministic project name derived from Root (the base
+	// name of its absolute path). It is the input to the manifest/init.md content
+	// generators, captured at detection time so Apply renders the same content a
+	// preview would describe.
+	ProjectName string
 	// WorkspaceExisted is true when the workspace directory was already present
 	// at detection time. It is the signal that distinguishes a from-scratch
 	// creation from an upgrade over an existing workspace.
 	WorkspaceExisted bool
+	// Backends are the validated, canonical target backends to record in the
+	// manifest, captured at detection time so Apply renders the same selection a
+	// preview would describe. It is always non-empty (defaulted to the MVP
+	// backend) and only ever holds supported values, because DetectWithOptions
+	// normalizes the selection before building the Plan.
+	Backends []string
 	// MissingDirs and MissingFiles are the canonical subdirectories and root
 	// artifacts that are absent and would be created by Apply, in deterministic
 	// order. Paths are workspace-relative (e.g. "agents", "init.md").
@@ -94,19 +106,51 @@ type Result struct {
 	CreatedFiles []string
 }
 
+// Options carries the optional, additive inputs that tune a detection without
+// changing the stable Detect(root) contract. A zero Options is valid and means
+// "all defaults", which is exactly what Detect uses — new knobs (e.g. backend
+// selection, ticket 01-04) go here so callers that don't need them are never
+// forced to change.
+type Options struct {
+	// Backends is the requested target backend selection, as provided by the
+	// caller (e.g. parsed from --backend). It is normalized — defaulted,
+	// validated against SupportedBackends and deduplicated — by DetectWithOptions
+	// before reaching the Plan, so an empty slice is the deterministic default
+	// and an unsupported value is rejected before anything is written.
+	Backends []string
+}
+
 // Detect inspects root and computes what the canonical `.daedalus/` structure is
 // missing, without writing anything. It is the detection half of the workflow
 // (ticket 01-02): callers use it to preview an upgrade before applying it, and
 // Apply/Create reuse it so detection logic is never duplicated. The returned
 // *Plan is a pure description; nothing is created until Plan.Apply runs.
 //
+// Detect uses default Options (the MVP backend). Callers that need to choose the
+// target backend(s) use DetectWithOptions; this signature is kept stable and
+// additive so existing callers and tests are never broken.
+func Detect(root string) (*Plan, error) {
+	return DetectWithOptions(root, Options{})
+}
+
+// DetectWithOptions is Detect with caller-supplied Options. It normalizes the
+// backend selection first — so an unsupported backend is rejected here, before
+// any filesystem inspection or write, keeping an invalid value out of the
+// manifest (R5/CA4) — then performs the same detection as Detect and records the
+// resolved backends on the Plan for Apply to persist.
+//
 // A subdirectory or root artifact is "missing" when it is absent. An entry that
 // exists but has the wrong type (e.g. a file where a directory is expected) is
 // reported as an error rather than silently planned over, because materializing
 // it would require a destructive overwrite.
-func Detect(root string) (*Plan, error) {
+func DetectWithOptions(root string, opts Options) (*Plan, error) {
+	backends, err := NormalizeBackends(opts.Backends)
+	if err != nil {
+		return nil, err
+	}
+
 	wsPath := filepath.Join(root, Name)
-	p := &Plan{Root: root, Path: wsPath}
+	p := &Plan{Root: root, Path: wsPath, ProjectName: deriveProjectName(root), Backends: backends}
 
 	switch info, err := os.Stat(wsPath); {
 	case err == nil:
@@ -163,9 +207,14 @@ func (p *Plan) Apply() (*Result, error) {
 	}
 
 	for _, name := range p.MissingFiles {
+		// Generate deterministic content for the artifact; unknown artifacts fall
+		// back to empty so adding a new root file never silently breaks. The
+		// resolved backend selection flows in here so the manifest records the
+		// caller's choice (defaulted/validated at detection time).
+		content, _ := artifactContent(name, p.ProjectName, p.Backends)
 		// O_EXCL guards against a TOCTOU race: if the file appeared between Detect
 		// and Apply we skip it rather than truncate, staying non-destructive.
-		created, err := ensureFile(filepath.Join(p.Path, name))
+		created, err := ensureFile(filepath.Join(p.Path, name), content)
 		if err != nil {
 			return nil, err
 		}
@@ -229,10 +278,12 @@ func fileExists(path string) (bool, error) {
 	}
 }
 
-// ensureFile creates an empty file at path only if it does not already exist.
-// It never truncates an existing file (non-destructive) and reports whether it
-// created a new one.
-func ensureFile(path string) (bool, error) {
+// ensureFile creates a file at path with the given deterministic content only if
+// it does not already exist. O_EXCL makes the create-or-skip decision atomic and
+// non-destructive: an existing file is never truncated or overwritten, so manual
+// edits survive a re-run untouched. It reports whether it created a new file
+// (created=false when the path already existed).
+func ensureFile(path, content string) (bool, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
@@ -240,5 +291,18 @@ func ensureFile(path string) (bool, error) {
 		}
 		return false, err
 	}
-	return true, f.Close()
+	// Write the content, then close. We must not defer Close here: a deferred
+	// Close would mask a Write error and we would lose the close error on the
+	// happy path. Write first, capture its error, then close and surface
+	// whichever error occurred (Write takes precedence, since a failed Write
+	// leaves the file in a bad state regardless of how Close goes).
+	_, writeErr := f.WriteString(content)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return false, writeErr
+	}
+	if closeErr != nil {
+		return false, closeErr
+	}
+	return true, nil
 }
