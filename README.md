@@ -64,6 +64,12 @@ docker run --rm -it daedalus:dev
 docker compose up --build
 ```
 
+## Documentation
+
+The full user manual lives in [`docs/`](docs/README.md) — installation,
+quickstart, the command-line guide, configuration, and contributing notes. It is
+organized as a manual with an index and grows alongside each feature.
+
 ## Configuration
 
 | Environment variable | Values                         | Default | Purpose                       |
@@ -81,6 +87,7 @@ internal/        Core packages (not importable outside this module)
   logging/       Structured logging baseline (log/slog)
   tui/           Bubble Tea bootstrap skeleton
 .github/workflows/  Continuous integration (build, test, lint)
+docs/            User manual (index + chapters), maintained alongside features
 development/     SDD planning artifacts (epics, tickets) — not shipped in the binary
 ```
 
