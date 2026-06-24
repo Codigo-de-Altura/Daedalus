@@ -81,6 +81,106 @@ Every workflow is identified by a **name**: a stable, unique, `kebab-case` slug
 workspace. A name that is not valid `kebab-case` is rejected with an explicit
 error and nothing is written. Phase ids follow the same `kebab-case` rule.
 
+## The default SDD workflow
+
+You do not start from an empty directory. When you run `daedalus init`, Daedalus
+seeds one ready-to-use workflow into `.daedalus/workflows/`: **`sdd-default`**,
+the default **SDD** (spec-driven development) pipeline. It is a valid, complete
+workflow you can use as-is, adapt to your project, or simply read as a worked
+example of the schema.
+
+The pipeline is a straight, linear chain of six phases — each run by one of the
+built-in agents, each producing the artifact the next phase consumes:
+
+| Phase | Agent | Consumes | Produces | Gate |
+|---|---|---|---|---|
+| `spec` | `analyst` | `brief` | `spec` | `spec-gate` |
+| `architecture` | `architect` | `spec` | `architecture` | `architecture-gate` |
+| `epics` | `planner` | `architecture` | `epics` | `epics-gate` |
+| `tickets` | `planner` | `epics` | `tickets` | `tickets-gate` |
+| `validation` | `validator` | `tickets` | `validation` | `validation-gate` |
+| `docs` | `documenter` | `validation` | `docs` | `docs-gate` |
+
+The first phase, `spec`, is the root: it consumes the external `brief` (the
+pipeline's initial artifact) through its `inputs`, so its `depends_on` is empty.
+Every other phase depends on the one before it, giving a clean chain with no
+cycles. You can see the exact seeded file at any time with
+`daedalus workflow show sdd-default`:
+
+```yaml
+phases:
+  - id: spec
+    agent: analyst
+    inputs: [brief]
+    outputs: [spec]
+    gate: spec-gate
+    depends_on: []
+  - id: architecture
+    agent: architect
+    inputs: [spec]
+    outputs: [architecture]
+    gate: architecture-gate
+    depends_on: [spec]
+  - id: epics
+    agent: planner
+    inputs: [architecture]
+    outputs: [epics]
+    gate: epics-gate
+    depends_on: [architecture]
+  - id: tickets
+    agent: planner
+    inputs: [epics]
+    outputs: [tickets]
+    gate: tickets-gate
+    depends_on: [epics]
+  - id: validation
+    agent: validator
+    inputs: [tickets]
+    outputs: [validation]
+    gate: validation-gate
+    depends_on: [tickets]
+  - id: docs
+    agent: documenter
+    inputs: [validation]
+    outputs: [docs]
+    gate: docs-gate
+    depends_on: [validation]
+```
+
+### Where the implementation step is
+
+You may notice there is no "implementation" or "developer" phase between
+`tickets` and `validation`, even though something must turn the tickets into a
+working implementation before it can be validated. That is intentional: Daedalus
+**configures** your project's AI structure but does not **execute** the pipeline,
+and the implementation step is performed **externally** — by a developer, or by an
+agent on your backend — not by Daedalus.
+
+So the implementation is the (un-modeled) gap on the edge from `tickets` to
+`validation`: Daedalus hands off the `tickets`, an external actor builds the
+implementation, and `validation` resumes from those same tickets. This is why the
+`validation` phase consumes `[tickets]` rather than an `implementation` artifact —
+no phase in this workflow produces an `implementation`, so listing it as an input
+would describe an artifact that never exists.
+
+### It is a valid DAG
+
+The seeded workflow passes semantic validation out of the box — no cycles, no
+missing artifacts, and every agent is a known built-in:
+
+```sh
+daedalus workflow validate sdd-default
+```
+
+```
+Workflow "sdd-default" is semantically valid.
+```
+
+The seeding is **non-destructive**: if you have already created or edited an
+`sdd-default.yaml`, re-running `daedalus init` leaves your file untouched and
+reports it as already present. It is yours to change — rename the gates, add or
+remove phases, or rework the chain entirely with the editing commands below.
+
 ## Listing workflows
 
 Use `daedalus workflow list` to see every persisted workflow with its name and

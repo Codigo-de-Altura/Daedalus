@@ -157,9 +157,13 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		"missing_files", len(plan.MissingFiles))
 
 	// Preview mode (--preview): report the plan and stop before any write so a
-	// non-interactive validator can inspect the proposed changes safely.
+	// non-interactive validator can inspect the proposed changes safely. The
+	// factory workflow seeding is part of init, so the preview mentions it too —
+	// but only when it would actually be written (it is non-destructive: an
+	// existing sdd-default.yaml is never reported as a change).
 	if *preview {
 		writePreview(stdout, plan)
+		writeSeedPreview(stdout, *dir)
 		logger.Info("init preview only", "applied", false)
 		return 0
 	}
@@ -184,7 +188,62 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		"created_files", len(res.CreatedFiles))
 
 	writeResult(stdout, res)
+
+	// Seed the factory-default SDD workflow into .daedalus/workflows/. This is
+	// orchestrated here, in the CLI, rather than inside internal/workspace so that
+	// package stays free of a workspace->workflows dependency (the seeding is a
+	// composition of two already-imported packages, not a new coupling). The seed
+	// is non-destructive: an existing sdd-default.yaml (e.g. one the user has
+	// edited) is never overwritten — Create uses O_CREATE|O_EXCL and reports
+	// ErrWorkflowExists, which we treat as "already present, left intact". A seed
+	// I/O failure does not fail the whole init: the workspace itself is already in
+	// place, so we log it and report it but still return success.
+	seedDefaultWorkflow(stdout, stderr, *dir)
 	return 0
+}
+
+// seedDefaultWorkflow writes the factory sdd-default.yaml into the target's
+// .daedalus/workflows/ directory non-destructively and reports the outcome on
+// stdout. The content is generated deterministically from workflows.DefaultWorkflow
+// via the store's Create (PlanCreate+Apply with O_EXCL), so re-running init never
+// clobbers a user-edited workflow and a clean run is byte-stable.
+func seedDefaultWorkflow(stdout, stderr io.Writer, dir string) {
+	logger := logging.New(stderr)
+	workflowsRoot := workflowsRootFor(dir)
+	path := filepath.Join(workflowsRoot, workflows.DefaultWorkflowName+workflows.FileExt)
+
+	err := workflows.Create(workflowsRoot, workflows.DefaultWorkflow())
+	switch {
+	case err == nil:
+		logger.Info("seeded default workflow", "name", workflows.DefaultWorkflowName, "path", path)
+		fmt.Fprintf(stdout, "Seeded factory workflow %q at %s.\n",
+			workflows.DefaultWorkflowName, filepath.ToSlash(path))
+	case errors.Is(err, workflows.ErrWorkflowExists):
+		// Already present — left intact (non-destructive re-run or user-edited file).
+		logger.Info("default workflow already present", "name", workflows.DefaultWorkflowName, "path", path)
+		fmt.Fprintf(stdout, "Factory workflow %q already present at %s — left intact.\n",
+			workflows.DefaultWorkflowName, filepath.ToSlash(path))
+	default:
+		// A seed failure is non-fatal: the workspace is already initialized.
+		logger.Error("seeding default workflow failed", "name", workflows.DefaultWorkflowName, "err", err)
+		fmt.Fprintf(stderr, "daedalus: warning: could not seed factory workflow %q: %v\n",
+			workflows.DefaultWorkflowName, err)
+	}
+}
+
+// writeSeedPreview reports, during a --preview init, whether the factory workflow
+// would be seeded. It mirrors the non-destructive seed semantics: if an
+// sdd-default.yaml already exists it is not listed as a change. It performs only a
+// read (a stat) and never writes.
+func writeSeedPreview(stdout io.Writer, dir string) {
+	path := filepath.Join(workflowsRootFor(dir), workflows.DefaultWorkflowName+workflows.FileExt)
+	if _, err := os.Stat(path); err == nil {
+		// Already present; a preview of an upgrade should not claim it as new.
+		return
+	}
+	fmt.Fprintf(stdout, "  + %s (factory workflow)\n",
+		filepath.ToSlash(filepath.Join(workspace.Name, workflows.WorkflowsDir,
+			workflows.DefaultWorkflowName+workflows.FileExt)))
 }
 
 // runAgent handles the `daedalus agent` subcommand, a thin CLI surface over the

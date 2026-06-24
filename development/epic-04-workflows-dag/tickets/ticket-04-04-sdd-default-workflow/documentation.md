@@ -1,28 +1,53 @@
-# Built-in `sdd-default` Workflow — Usage Guide
+# Ticket 04-04 — Factory `sdd-default` Workflow
 
-> Authored and maintained by C-3PO, technical writer for Daedalus. Part of the growing end-user usage guide. Written for the person who uses the Daedalus product, not for internals.
+> **Pointer:** the user-facing guide for this feature lives in the manual, as a
+> section of the workflows chapter:
+> [`docs/guide/managing-workflows.md` → The default SDD workflow](../../../../docs/guide/managing-workflows.md#the-default-sdd-workflow).
+> This file is only a pointer; the chapter is the actual guide.
 
 ## Overview
 
-_To be completed by C-3PO after implementation._
+`daedalus init` seeds a ready-to-use factory workflow, `sdd-default.yaml`, into
+`.daedalus/workflows/`, so a new workspace starts with the default SDD pipeline
+instead of an empty directory. It is a complete, valid DAG you can use as-is,
+adapt, or read as a worked example of the schema.
 
 ## How to use
 
-Daedalus ships with a factory workflow, `sdd-default.yaml`, available in your workspace under `.daedalus/workflows/`. It encodes the default SDD pipeline so you do not have to write it by hand:
+The workflow is created for you by `daedalus init`; you do not author it. It is a
+linear chain of six phases, each run by a built-in agent:
 
 ```
-brief → spec → architecture → epics → tickets → (external implementation) → validation → docs
+brief → spec → architecture → epics → tickets → ⟨external implementation⟩ → validation → docs
 ```
 
-Each phase names the agent that runs it (analyst, architect, planner, planner, validator, documenter), the artifacts it consumes and produces, and a validation gate. You can view it like any other workflow, and use it as the starting point for your project's pipeline.
+| Phase | Agent | Consumes | Produces | Gate |
+|---|---|---|---|---|
+| `spec` | `analyst` | `brief` | `spec` | `spec-gate` |
+| `architecture` | `architect` | `spec` | `architecture` | `architecture-gate` |
+| `epics` | `planner` | `architecture` | `epics` | `epics-gate` |
+| `tickets` | `planner` | `epics` | `tickets` | `tickets-gate` |
+| `validation` | `validator` | `tickets` | `validation` | `validation-gate` |
+| `docs` | `documenter` | `validation` | `docs` | `docs-gate` |
 
-## Options / flags
-
-_To be completed by C-3PO after implementation (how the default workflow is provided and referenced)._
+- View it with `daedalus workflow show sdd-default`.
+- Validate it with `daedalus workflow validate sdd-default` (it is valid out of
+  the box: exit 0).
 
 ## Notes & limitations
 
-- **Phase 1: Daedalus configures the AI structure; it does not execute agents.** `sdd-default.yaml` is a definition of the pipeline — Daedalus provides and validates it, but does not run the agents.
-- The **implementation** step is external: a developer or agent performs it in the backend, outside Daedalus; the workflow only reflects where the implementation artifact enters the pipeline to be validated.
-- The workflow is backend-agnostic and is written in the canonical DAG YAML format.
-- It is provided as a deterministic, git-friendly file (stable, ordered keys) and passes Daedalus' DAG validation (no cycles, no missing artifacts, no unknown agents).
+- **External implementation step.** There is no implementation/developer phase
+  between `tickets` and `validation`. The implementation is performed externally
+  (a developer or a backend agent), so it is the un-modeled gap on that edge:
+  Daedalus hands off the tickets, an external actor implements, and `validation`
+  resumes from the same tickets. This is why `validation` consumes `[tickets]`,
+  not an `implementation` artifact.
+- **Non-destructive seeding.** If you have already created or edited
+  `sdd-default.yaml`, re-running `init` leaves your file untouched and reports it
+  as already present. In `--preview`, a fresh init lists the factory workflow as
+  a change but writes nothing.
+- Phase 1 configures the AI structure; it does not execute workflows.
+
+See [`docs/guide/managing-workflows.md` → The default SDD workflow](../../../../docs/guide/managing-workflows.md#the-default-sdd-workflow)
+for the full seeded YAML, the external-implementation explanation, and the init
+output.
