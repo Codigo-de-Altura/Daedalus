@@ -193,13 +193,13 @@ func (st *areaState) visibleItems() []areaItem {
 func (m Model) handleAreaKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	st := m.areas[m.active]
 
-	if key.Matches(msg, m.keys.Back) {
+	if key.Matches(msg, m.keys.binding(actionBack)) {
 		return m.pop(), nil
 	}
 
 	// In the error state, retry re-triggers the core load so the user can recover
 	// in place instead of being stuck (R7/CA6). Other navigation still works.
-	if st.err != nil && key.Matches(msg, m.keys.Retry) {
+	if st.err != nil && key.Matches(msg, m.keys.binding(actionRetry)) {
 		st.loading = true
 		st.loaded = false
 		st.err = nil
@@ -214,7 +214,7 @@ func (m Model) handleAreaKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// "/" opens the filter form over the loaded list (R5). It is available whenever
 	// there are items to filter, including over an active filter (to refine it).
-	if key.Matches(msg, m.keys.Filter) && len(st.items) > 0 {
+	if key.Matches(msg, m.keys.binding(actionFilter)) && len(st.items) > 0 {
 		return m.openFilterForm()
 	}
 
@@ -225,15 +225,15 @@ func (m Model) handleAreaKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	visible := st.visibleItems()
 	switch {
-	case key.Matches(msg, m.keys.Up):
+	case key.Matches(msg, m.keys.binding(actionUp)):
 		if st.cursor > 0 {
 			st.cursor--
 		}
-	case key.Matches(msg, m.keys.Down):
+	case key.Matches(msg, m.keys.binding(actionDown)):
 		if st.cursor < len(visible)-1 {
 			st.cursor++
 		}
-	case key.Matches(msg, m.keys.Enter):
+	case key.Matches(msg, m.keys.binding(actionEnter)):
 		if len(visible) == 0 {
 			return m, nil
 		}
@@ -301,15 +301,15 @@ func (m Model) handleSubLoaded(msg subLoadedMsg) (tea.Model, tea.Cmd) {
 // there is deliberately no binding that mutates or runs anything. Top/bottom jumps
 // are explicit; the viewport handles line/page scrolling via its own Update.
 func (m Model) handleSubKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.Matches(msg, m.keys.Back) {
+	if key.Matches(msg, m.keys.binding(actionBack)) {
 		return m.pop(), nil
 	}
 
 	switch {
-	case key.Matches(msg, m.keys.Top):
+	case key.Matches(msg, m.keys.binding(actionTop)):
 		m.viewport.GotoTop()
 		return m, nil
-	case key.Matches(msg, m.keys.Botom):
+	case key.Matches(msg, m.keys.binding(actionBottom)):
 		m.viewport.GotoBottom()
 		return m, nil
 	}

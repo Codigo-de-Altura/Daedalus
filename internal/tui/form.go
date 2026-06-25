@@ -29,17 +29,15 @@ import (
 // (select and confirm builders live in newSelectForm / newConfirmForm below.)
 
 // formComponent is a themed, navigable wrapper around a huh.Form. It owns the
-// form's lifecycle and the chrome (title + submit/cancel help) drawn around it, so
-// every form in the TUI shares one look and one set of submit/cancel affordances
-// (Check-10). The bound value pointers are held by the concrete constructor (e.g.
-// newFilterForm captures &query), so on submit the caller reads the captured value.
+// form's lifecycle and the title drawn above it. It deliberately renders NO help of
+// its own: the shell draws a single contextual help footer (from the central
+// registry, formHelp context) for forms just like every other screen, so there is
+// one help source and no duplicated footer (07-03 consolidation of the 07-02 double
+// help line). The bound value is read back from the form on submit (StringValue).
 type formComponent struct {
 	theme theme
 	form  *huh.Form
 	title string
-	// help is the one-line submit/cancel hint shown under the form so the user can
-	// always infer how to submit or cancel (R7/Check-10).
-	help string
 	// valueKey is the Huh field key the caller reads on submit via StringValue. We
 	// read the value back from the form (not a bound *string) because the model is a
 	// value type copied on every Update — a pointer into a model field would go stale
@@ -67,31 +65,32 @@ const (
 )
 
 // newFormComponent builds a themed form component from an already-constructed
-// huh.Form. It wires the shared form theme and a keymap where esc cancels (in
-// addition to Huh's ctrl+c), so cancelling a form uses the same "esc goes back"
-// muscle memory as the rest of the shell (R7/CA6 consistency). showErrors/showHelp
-// are left on so validation messages and Huh's own field help render in-place.
-func newFormComponent(th theme, form *huh.Form, title, help, valueKey string) formComponent {
-	keymap := huh.NewDefaultKeyMap()
-	// esc cancels the form everywhere, matching the shell's universal "back/cancel"
-	// key; ctrl+c stays as the hard quit. This is what makes Check-6 (cancel without
-	// breaking navigation) work with the key the user already expects.
-	keymap.Quit = key.NewBinding(
+// huh.Form. It wires the shared form theme and a keymap where esc cancels (matching
+// actionFormCancel in the central registry) so cancelling a form uses the same "esc
+// goes back" muscle memory as the rest of the shell. Huh's built-in help is turned
+// OFF (WithShowHelp(false)) because the shell now draws the single contextual help
+// footer for forms from the central registry — leaving Huh's on would reproduce the
+// 07-02 double help line. Validation errors stay on so they render in-place.
+func newFormComponent(th theme, form *huh.Form, title, valueKey string) formComponent {
+	km := huh.NewDefaultKeyMap()
+	// esc cancels the form everywhere; ctrl+c stays as the hard quit. These mirror
+	// actionFormCancel / actionQuit so the form's real keys match what the shell's
+	// formHelp context announces (announced == real).
+	km.Quit = key.NewBinding(
 		key.WithKeys("esc", "ctrl+c"),
 		key.WithHelp("esc", "cancel"),
 	)
 
 	form = form.
 		WithTheme(th.formTheme()).
-		WithKeyMap(keymap).
-		WithShowHelp(true).
+		WithKeyMap(km).
+		WithShowHelp(false).
 		WithShowErrors(true)
 
 	return formComponent{
 		theme:    th,
 		form:     form,
 		title:    title,
-		help:     help,
 		valueKey: valueKey,
 	}
 }
@@ -121,11 +120,12 @@ func (c formComponent) Update(msg tea.Msg) (formComponent, formResultKind, tea.C
 	}
 }
 
-// View renders the form inside the themed chrome: a title, the form's own fields
-// (which Huh draws with our theme), and the submit/cancel help line so the user
-// always sees how to finish or back out (Check-10). When the form has quit Huh
-// returns an empty body; the caller stops rendering the form route before that,
-// but we guard anyway so a stray frame is never blank.
+// View renders the form inside the themed chrome: a title and the form's own fields
+// (which Huh draws with our theme). It deliberately renders NO help line — the shell
+// adds the single contextual help footer (formHelp) below the form body, so help is
+// unified across the TUI. When the form has quit Huh returns an empty body; the
+// caller stops rendering the form route before that, but we guard anyway so a stray
+// frame is never blank.
 func (c formComponent) View() string {
 	var b strings.Builder
 	b.WriteString(c.theme.formTitle.Render(c.title))
@@ -135,8 +135,6 @@ func (c formComponent) View() string {
 		body = c.theme.subtle.Render("…")
 	}
 	b.WriteString(body)
-	b.WriteString("\n")
-	b.WriteString(c.theme.formHelp.Render(c.help))
 	return b.String()
 }
 
@@ -159,8 +157,7 @@ func newFilterForm(th theme, area, initial string) formComponent {
 		Validate(validateFilterQuery)
 
 	form := huh.NewForm(huh.NewGroup(input))
-	return newFormComponent(th, form, fmt.Sprintf("Filter · %s", area),
-		"enter submit · esc cancel", "filter")
+	return newFormComponent(th, form, fmt.Sprintf("Filter · %s", area), "filter")
 }
 
 // validateFilterQuery is the filter input's validation rule. An empty string is
@@ -194,7 +191,7 @@ func newSelectForm(th theme, title string, options []string, value *string) form
 		Options(opts...).
 		Value(value)
 	form := huh.NewForm(huh.NewGroup(sel))
-	return newFormComponent(th, form, title, "enter select · esc cancel", "choice")
+	return newFormComponent(th, form, title, "choice")
 }
 
 // newConfirmForm builds a reusable yes/no confirmation form bound to the given
@@ -209,5 +206,5 @@ func newConfirmForm(th theme, title, affirmative, negative string, value *bool) 
 		Negative(negative).
 		Value(value)
 	form := huh.NewForm(huh.NewGroup(confirm))
-	return newFormComponent(th, form, title, "←/→ choose · enter confirm · esc cancel", "confirm")
+	return newFormComponent(th, form, title, "confirm")
 }

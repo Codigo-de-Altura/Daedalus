@@ -58,7 +58,7 @@ type Model struct {
 	workdir string
 
 	theme theme
-	keys  navKeyMap
+	keys  keymap
 	help  help.Model
 
 	// width/height track the terminal size so the lists and the sub-screen viewport
@@ -103,101 +103,6 @@ type Model struct {
 	form formComponent
 }
 
-// navKeyMap declares every navigation binding the shell understands. It is the
-// SINGLE keymap used by every area and every sub-screen, which is what makes the
-// shortcuts consistent everywhere (R4/CA6): enter/back/quit behave identically no
-// matter where the user is. It implements help.KeyMap so the contextual help
-// footer is generated from the bindings themselves and can never drift from the
-// real keys.
-//
-// 07-03 will formalize a central keybinding registry; this map is intentionally
-// small and uniform so it can be lifted into that registry without changing any
-// area's behavior.
-type navKeyMap struct {
-	Up     key.Binding
-	Down   key.Binding
-	Enter  key.Binding
-	Back   key.Binding
-	Home   key.Binding
-	Retry  key.Binding
-	Filter key.Binding
-	Help   key.Binding
-	Quit   key.Binding
-	PgUp   key.Binding
-	PgDn   key.Binding
-	Top    key.Binding
-	Botom  key.Binding
-}
-
-func defaultNavKeyMap() navKeyMap {
-	return navKeyMap{
-		Up: key.NewBinding(
-			key.WithKeys("up", "k"),
-			key.WithHelp("↑/k", "up"),
-		),
-		Down: key.NewBinding(
-			key.WithKeys("down", "j"),
-			key.WithHelp("↓/j", "down"),
-		),
-		// enter (and l, vim-style) is the universal "go in" key: it enters the
-		// selected area from the root and opens the selected entry inside an area.
-		Enter: key.NewBinding(
-			key.WithKeys("enter", "l"),
-			key.WithHelp("enter", "enter"),
-		),
-		// esc (and backspace) is the universal "go back one level" key. It is the
-		// same everywhere — from a sub-screen back to its area, and from an area back
-		// to the root — so the way out is always identical (R4/CA6). On the root it is
-		// inert (there is nothing above the menu); q quits from there.
-		Back: key.NewBinding(
-			key.WithKeys("esc", "backspace"),
-			key.WithHelp("esc", "back"),
-		),
-		// "h" (Home) jumps straight to the root from anywhere, so a user deep inside
-		// an area can return to the menu in one keystroke instead of popping levels.
-		Home: key.NewBinding(
-			key.WithKeys("h"),
-			key.WithHelp("h", "home"),
-		),
-		// "r" retries an area that failed to load, so an error state is never a dead
-		// end: the user can re-trigger the core load without leaving and re-entering.
-		Retry: key.NewBinding(
-			key.WithKeys("r"),
-			key.WithHelp("r", "retry"),
-		),
-		// "/" opens the list filter form over an area's items, the conventional
-		// search/filter key in TUIs so it is discoverable without instruction.
-		Filter: key.NewBinding(
-			key.WithKeys("/"),
-			key.WithHelp("/", "filter"),
-		),
-		Help: key.NewBinding(
-			key.WithKeys("?"),
-			key.WithHelp("?", "toggle help"),
-		),
-		Quit: key.NewBinding(
-			key.WithKeys("q", "ctrl+c"),
-			key.WithHelp("q", "quit"),
-		),
-		PgUp: key.NewBinding(
-			key.WithKeys("pgup", "b"),
-			key.WithHelp("pgup", "page up"),
-		),
-		PgDn: key.NewBinding(
-			key.WithKeys("pgdown", "f", " "),
-			key.WithHelp("pgdn", "page down"),
-		),
-		Top: key.NewBinding(
-			key.WithKeys("home", "g"),
-			key.WithHelp("g", "top"),
-		),
-		Botom: key.NewBinding(
-			key.WithKeys("end", "G"),
-			key.WithHelp("G", "bottom"),
-		),
-	}
-}
-
 // New returns an initialized area-shell Model rooted at workdir. workdir is the
 // directory whose `.daedalus/` workspace the areas read; passing "" means the
 // current directory, so callers that do not care about the location can omit it.
@@ -207,11 +112,12 @@ func New(workdir string) Model {
 	if workdir == "" {
 		workdir = "."
 	}
+	th := defaultTheme()
 	return Model{
 		workdir: workdir,
-		theme:   defaultTheme(),
-		keys:    defaultNavKeyMap(),
-		help:    help.New(),
+		theme:   th,
+		keys:    defaultKeymap(),
+		help:    newHelpModel(th),
 		stack:   []route{routeRoot},
 		areas:   newAreaStates(),
 	}
@@ -231,15 +137,22 @@ func (m Model) Init() tea.Cmd {
 // never run inline.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// While a form is active it owns the keyboard: it must receive every message
-	// (keys AND its own cursor-blink ticks) so typing and validation work, and so the
-	// global help/quit keys do not steal characters the user is typing. The form's
-	// submit/cancel lifecycle is handled in updateForm, which is the only place that
-	// leaves routeForm — always back to the area, never into a dead end.
+	// (keys AND its own cursor-blink ticks) so typing and validation work. The one
+	// exception is the dedicated help key (?), which toggles the expanded help in
+	// EVERY context — including forms (R4/Check-4) — so help is always reachable with
+	// the same key; everything else (including a literal q or letters) goes to the
+	// form so typing is never swallowed.
 	if m.current() == routeForm {
-		if sz, ok := msg.(tea.WindowSizeMsg); ok {
+		switch msg := msg.(type) {
+		case tea.WindowSizeMsg:
 			// Still track size so other screens are laid out correctly after the form.
-			m.width = sz.Width
-			m.height = sz.Height
+			m.width = msg.Width
+			m.height = msg.Height
+		case tea.KeyMsg:
+			if key.Matches(msg, m.keys.binding(actionHelp)) {
+				m.help.ShowAll = !m.help.ShowAll
+				return m, nil
+			}
 		}
 		return m.updateForm(msg)
 	}
@@ -281,6 +194,10 @@ func (m Model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
 
+	// Let the help renderer know the available width so the short bar truncates and
+	// the expanded columns lay out within the terminal instead of overflowing.
+	m.help.Width = msg.Width
+
 	vpWidth, vpHeight := m.subViewportSize()
 	if !m.viewportReady {
 		m.viewport = viewport.New(vpWidth, vpHeight)
@@ -298,10 +215,10 @@ func (m Model) handleResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 // uniform across areas (R4/CA6).
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
-	case key.Matches(msg, m.keys.Help):
+	case key.Matches(msg, m.keys.binding(actionHelp)):
 		m.help.ShowAll = !m.help.ShowAll
 		return m, nil
-	case key.Matches(msg, m.keys.Quit):
+	case key.Matches(msg, m.keys.binding(actionQuit)):
 		// q/ctrl+c quit from the root and from any area list, where leaving the app is
 		// the natural action. Inside a scrollable sub-screen, q is reserved (esc is the
 		// documented way back) so the user does not accidentally exit while reading;
@@ -320,7 +237,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Home jumps to the root from anywhere except the root itself (where it would be
 	// a no-op and "h" is free for future use). It is a one-key shortcut for popping
 	// every level, complementing esc's one-level-at-a-time back.
-	if key.Matches(msg, m.keys.Home) && m.current() != routeRoot {
+	if key.Matches(msg, m.keys.binding(actionHome)) && m.current() != routeRoot {
 		return m.goHome(), nil
 	}
 
@@ -341,15 +258,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // keeping quit predictable.
 func (m Model) handleRootKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
-	case key.Matches(msg, m.keys.Up):
+	case key.Matches(msg, m.keys.binding(actionUp)):
 		if m.rootCursor > 0 {
 			m.rootCursor--
 		}
-	case key.Matches(msg, m.keys.Down):
+	case key.Matches(msg, m.keys.binding(actionDown)):
 		if m.rootCursor < len(areaOrder)-1 {
 			m.rootCursor++
 		}
-	case key.Matches(msg, m.keys.Enter):
+	case key.Matches(msg, m.keys.binding(actionEnter)):
 		return m.enterArea(areaOrder[m.rootCursor])
 	}
 	return m, nil
@@ -466,12 +383,20 @@ func (m Model) frame(body string) string {
 	b.WriteString(m.breadcrumb())
 	b.WriteString("\n\n")
 	b.WriteString(body)
-	// A form draws its own submit/cancel help (and field help) inside its body, so
-	// the shell suppresses its key footer there to avoid two competing help lines.
-	// Every other screen gets the contextual footer.
-	if m.current() != routeForm {
-		b.WriteString("\n\n")
-		b.WriteString(m.help.View(m))
+	// EVERY screen — including forms — gets exactly one contextual help footer,
+	// rendered here from the central registry. Forms used to draw their own help line
+	// (plus Huh's), producing a redundant double footer (07-02 minor); now the form
+	// body carries no help and Huh's built-in help is off, so this single footer is
+	// the sole, consistent help source across the whole TUI (R6/R7).
+	//
+	// Collapsed: the short bar (bubbles/help). Expanded (?): our own column layout
+	// (renderFullHelp) which keeps a clear gutter between groups; both draw from the
+	// same registry-resolved bindings, so announced == real either way.
+	b.WriteString("\n\n")
+	if m.help.ShowAll {
+		b.WriteString(renderFullHelp(m.theme, m.FullHelp()))
+	} else {
+		b.WriteString(m.help.ShortHelpView(m.ShortHelp()))
 	}
 	return b.String()
 }
@@ -557,48 +482,38 @@ func (m Model) scrollHint() string {
 		formatScrollPercent(m.viewport.ScrollPercent()))
 }
 
-// ShortHelp implements help.KeyMap. It returns the bindings relevant to the
-// active screen so the one-line help footer always matches what the current
-// screen accepts (R4/Check-10). The keys themselves are identical across areas —
-// only which subset is advertised changes per route.
-func (m Model) ShortHelp() []key.Binding {
+// helpContextFor returns the declared help context for the active screen — the
+// subset of actions that apply right here (R5). It is the single switch that maps a
+// route (and an area's error state) to its declared context; the contexts
+// themselves live in help.go and the keys behind them in keybindings.go, so this
+// function chooses WHAT applies, never WHICH key it is.
+func (m Model) helpContextFor() helpContext {
 	switch m.current() {
 	case routeRoot:
-		return []key.Binding{m.keys.Up, m.keys.Down, m.keys.Enter, m.keys.Help, m.keys.Quit}
+		return rootHelp
+	case routeForm:
+		return formHelp
 	case routeSub:
-		return []key.Binding{m.keys.Up, m.keys.Down, m.keys.Back, m.keys.Home, m.keys.Help, m.keys.Quit}
+		return subHelp
 	default:
 		st := m.areas[m.active]
 		if st != nil && st.err != nil {
-			return []key.Binding{m.keys.Retry, m.keys.Back, m.keys.Home, m.keys.Help, m.keys.Quit}
+			return areaErrorHelp
 		}
-		return []key.Binding{m.keys.Up, m.keys.Down, m.keys.Enter, m.keys.Filter, m.keys.Back, m.keys.Home, m.keys.Help, m.keys.Quit}
+		return areaHelp
 	}
 }
 
-// FullHelp implements help.KeyMap, grouping the bindings shown when help is
-// expanded (?). It mirrors ShortHelp's per-route subsets and adds the paging/jump
-// keys a sub-screen supports.
+// ShortHelp / FullHelp implement bubbles/help's KeyMap by delegating to the active
+// context resolved against the central registry. Because both views come from the
+// same context and the same bindings, the short bar and the expanded view agree
+// with each other and with the real keys (announced == real, R7/Check-5).
+func (m Model) ShortHelp() []key.Binding {
+	return m.helpContextFor().shortBindings(m.keys)
+}
+
 func (m Model) FullHelp() [][]key.Binding {
-	switch m.current() {
-	case routeRoot:
-		return [][]key.Binding{
-			{m.keys.Up, m.keys.Down},
-			{m.keys.Enter, m.keys.Help, m.keys.Quit},
-		}
-	case routeSub:
-		return [][]key.Binding{
-			{m.keys.Up, m.keys.Down, m.keys.PgUp, m.keys.PgDn},
-			{m.keys.Top, m.keys.Botom},
-			{m.keys.Back, m.keys.Home, m.keys.Help, m.keys.Quit},
-		}
-	default:
-		return [][]key.Binding{
-			{m.keys.Up, m.keys.Down, m.keys.Enter, m.keys.Filter},
-			{m.keys.Retry, m.keys.Back, m.keys.Home},
-			{m.keys.Help, m.keys.Quit},
-		}
-	}
+	return m.helpContextFor().fullBindings(m.keys)
 }
 
 // Ensure the model satisfies the help.KeyMap and tea.Model contracts at compile

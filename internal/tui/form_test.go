@@ -264,10 +264,10 @@ func TestReusableFormBuilders(t *testing.T) {
 	if !strings.Contains(view, "Proceed?") {
 		t.Errorf("confirm form should render its title, got:\n%s", view)
 	}
-	// Both expose the submit/cancel affordance consistently (Check-10).
-	if !strings.Contains(sel.View(), "cancel") || !strings.Contains(conf.View(), "cancel") {
-		t.Error("reusable forms should advertise cancel")
-	}
+	// The submit/cancel affordance is no longer drawn by the form component itself —
+	// the shell renders one contextual help footer (formHelp) for forms, unifying the
+	// old double help line (07-03). That affordance is asserted in the help tests; here
+	// we only confirm the builders produce valid, themed forms.
 }
 
 // TestFilterValidatorUnit checks the validation rule directly so the boundary cases

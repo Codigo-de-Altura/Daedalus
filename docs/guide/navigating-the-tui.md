@@ -9,8 +9,8 @@ each area, how to step back, and how to read where you are. The keys are the
 same everywhere, so once you learn them in one area you know them in all of them.
 
 > This chapter covers how you move around the interface, read documents in it,
-> and filter lists. The full keyboard-shortcut help system and in-interface
-> editing of artifacts arrive in later chapters as those features ship.
+> filter lists, and get help on the available shortcuts. In-interface editing of
+> artifacts arrives in a later chapter as that feature ships.
 
 ## Launching the interface
 
@@ -51,7 +51,8 @@ what is there. Creating and editing artifacts is done with the matching
 ## Moving around
 
 Navigation uses one small, consistent set of keys. They behave the same on every
-area and every detail screen.
+area and every detail screen: the same action always uses the same key, so once
+you learn a key it works everywhere it applies.
 
 | Key | Action |
 |---|---|
@@ -66,8 +67,8 @@ area and every detail screen.
 | `q` / `Ctrl+C` | Quit Daedalus |
 
 A help line at the bottom of every screen always shows the keys available where
-you are, so you never have to memorize them. Press `?` to expand it for the full
-list on the current screen.
+you are, so you never have to memorize them. See [Getting help](#getting-help)
+below for how to expand it.
 
 ### Entering an area
 
@@ -196,6 +197,79 @@ back available** — you can step back or jump home no matter what an area shows
 - **Error** — if an area cannot load (for example a malformed file), it shows the
   error and a prompt to recover. Press `r` to **retry** the load in place, or
   `esc` to go back. An error never strands you.
+
+## Getting help
+
+You never have to remember the keys. Every screen shows a **help line** at the
+bottom listing the shortcuts you can use right now. Two views, one key:
+
+- The **short help line** is always visible — a compact row of the handful of
+  shortcuts most worth knowing on the current screen.
+- Press `?` to **expand** it into the full list of every shortcut available in
+  the current context, grouped for easy scanning. Press `?` again to collapse it.
+
+The help is **contextual** — it shows what applies where you are, and nothing
+that does not:
+
+- On an **area list**, it shows move, open, filter, back, and home.
+- In a **detail screen**, it shows the scrolling keys (line, page, and
+  jump-to-top/bottom) and back.
+- In a **form** (such as the list filter), it shows submit, cancel, and how to
+  move between fields.
+- Even in the **loading**, **empty**, and **error** states the help line stays
+  available, so help — and the way out — is always one `?` away.
+
+`?` works in **every** context, including while a form is open. What the help
+line announces is exactly what works: the shortcuts you see are the shortcuts the
+screen accepts.
+
+## Keyboard shortcuts reference
+
+The same action always uses the same key. Which keys are *available* depends on
+the screen, but their meaning never changes.
+
+**Everywhere:**
+
+| Key | Action |
+|---|---|
+| `?` | Toggle the help line (short ↔ expanded) |
+| `q` / `Ctrl+C` | Quit Daedalus (`q` is held back while reading or typing — see below) |
+
+**Root menu and area lists:**
+
+| Key | Action |
+|---|---|
+| `↑` / `k`, `↓` / `j` | Move the selection |
+| `enter` / `l` | Enter an area, or open the selected item |
+| `/` | Filter the list (when the area has items) |
+| `esc` / `backspace` | Go back one level |
+| `h` | Jump to the root menu |
+| `r` | Retry a failed load (error state only) |
+
+**Detail screens (reading a document or DAG):**
+
+| Key | Action |
+|---|---|
+| `↑` / `k`, `↓` / `j` | Scroll line by line |
+| `pgup` / `b`, `pgdn` / `f` / `space` | Scroll by page |
+| `g`, `G` | Jump to top / bottom |
+| `esc` / `backspace` | Back to the list |
+| `h` | Jump to the root menu |
+
+**Forms (such as the filter):**
+
+| Key | Action |
+|---|---|
+| `enter` | Submit |
+| `esc` | Cancel |
+| `tab`, `shift+tab` | Move to the next / previous field |
+
+While you are reading a detail screen or typing in a form, `q` is *not* a quit —
+it scrolls or types normally — so you never exit by accident. Use `esc` to back
+out, or `Ctrl+C` if you really want to quit. (The one shortcut that still works
+inside a form is `?`, which opens the help rather than typing a literal `?`.)
+
+Shortcuts are fixed in this version of Daedalus; they cannot be remapped.
 
 ---
 

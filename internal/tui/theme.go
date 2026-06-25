@@ -67,12 +67,11 @@ type theme struct {
 	previewFrame lipgloss.Style
 
 	// --- forms (Huh) ---
-	// formTitle / formHelp style the shell chrome around an embedded form (the
-	// heading and the submit/cancel hint) so the form's surroundings match the theme.
-	// The fields and their validation errors are drawn by Huh using the derived form
-	// theme (see formTheme), so no separate error token is needed here.
+	// formTitle styles the heading drawn above an embedded form. The form's own help
+	// is no longer styled here: the shell draws one contextual help footer for forms
+	// (from the central registry) like every other screen (07-03), and the fields and
+	// their validation errors are drawn by Huh using the derived form theme (formTheme).
 	formTitle lipgloss.Style
-	formHelp  lipgloss.Style
 
 	// --- workflow DAG view (ticket 04-02) ---
 	dagNode   lipgloss.Style
@@ -167,7 +166,6 @@ func defaultTheme() theme {
 			Padding(0, 1),
 
 		formTitle: lipgloss.NewStyle().Bold(true).Foreground(p.accent),
-		formHelp:  lipgloss.NewStyle().Foreground(p.muted),
 
 		dagNode: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
