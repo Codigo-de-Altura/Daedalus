@@ -4405,6 +4405,7 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	}
 
 	logger := logging.New(stderr)
+	logger.Info("validation started", "phase", "scan", "path", filepath.ToSlash(*dir))
 
 	report, err := conventions.WorkspaceUnder(*dir).Validate()
 	if err != nil {
@@ -4412,6 +4413,13 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "daedalus: validate failed: %v\n", err)
 		return 2
 	}
+
+	// Emit one decision-point event per finding (CA3): which definition/location was
+	// evaluated, the convention family and rule it broke, and the reason — at warn
+	// for advisories and error for hard violations, so the trace reconstructs every
+	// rejection without re-running the command. The reason is the convention's own
+	// structured explanation; it never carries file contents or secrets (R5/CA5).
+	logFindings(logger, report.Findings)
 
 	errs, warns := report.Counts()
 	logger.Info("workspace validated", "errors", errs, "warnings", warns, "conformant", report.Conformant())
@@ -4437,6 +4445,30 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// logFindings emits one decision-point log per convention finding (CA3/CA4): the
+// affected workspace-relative location, the convention family and the short rule
+// id it broke, and the structured reason. Hard violations log at error and
+// advisories at warn so the levels stay coherent with the rest of the
+// instrumentation (R4/CA4). It is observational only — it never changes the
+// report, the printed output or the exit code.
+func logFindings(logger *slog.Logger, findings []conventions.Finding) {
+	for _, f := range findings {
+		args := []any{
+			"phase", "validate",
+			"family", string(f.Family),
+			"definition", f.Location,
+			"convention", f.Convention,
+			"result", "invalid",
+			"reason", f.Reason,
+		}
+		if f.Severity == conventions.SeverityError {
+			logger.Error("convention violated", args...)
+		} else {
+			logger.Warn("convention violated", args...)
+		}
+	}
 }
 
 // writePreview renders, on stdout, the directories and root artifacts a plan

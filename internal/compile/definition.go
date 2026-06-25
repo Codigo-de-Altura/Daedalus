@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -81,16 +82,31 @@ func plural(n int) string {
 // valid (if trivial) definition. Whether a backend needs at least one agent is a
 // backend concern, surfaced by its Compiler, not a property of the canonical
 // definition.
+//
+// LoadDefinition is the public, logger-free entry point preserved for callers that
+// only want the result; the build pipeline uses loadDefinition to also emit a
+// per-definition validation event at each decision point (RF-9.1/CA3).
 func LoadDefinition(root string) (Definition, error) {
+	return loadDefinition(root, discardLogger())
+}
+
+// loadDefinition is LoadDefinition with decision-point instrumentation: it emits
+// one structured event per canonical definition (agent/command) reporting whether
+// it was accepted, rejected (invalid schema) or malformed, and — on rejection —
+// the reason, so a build's trace reconstructs exactly which definition was
+// evaluated and why it passed or failed (RF-9.1/CA3). The logging is purely
+// observational: the returned Definition/error is identical with or without it, so
+// the validate-before-write contract and determinism (RNF-5/CA6) are untouched.
+func loadDefinition(root string, logger *slog.Logger) (Definition, error) {
 	var (
 		def    Definition
 		defErr DefinitionError
 	)
 
-	if err := loadAgents(root, &def, &defErr); err != nil {
+	if err := loadAgents(root, &def, &defErr, logger); err != nil {
 		return Definition{}, err
 	}
-	if err := loadCommands(root, &def, &defErr); err != nil {
+	if err := loadCommands(root, &def, &defErr, logger); err != nil {
 		return Definition{}, err
 	}
 
@@ -100,11 +116,23 @@ func LoadDefinition(root string) (Definition, error) {
 	return def, nil
 }
 
+// discardLogger returns a logger that drops every record, so the logger-free
+// LoadDefinition and any test path can run the instrumented loader without a sink.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(noopWriter{}, nil))
+}
+
 // loadAgents reads and validates the canonical agents into def, appending any
 // per-source problem to defErr. A real I/O error (other than a missing agents
 // directory, which simply means "no agents") is returned so the caller surfaces
 // it rather than treating it as a validation problem.
-func loadAgents(root string, def *Definition, defErr *DefinitionError) error {
+//
+// It emits one decision-point event per agent (CA3): a malformed source or a
+// schema-invalid agent is logged at warn with its workspace-relative path and the
+// reason for rejection; an accepted agent is logged at info. The reason is taken
+// from the structured error text (field/observed/expected for invalid agents),
+// which never carries the prompt body or any secret (R5/CA5).
+func loadAgents(root string, def *Definition, defErr *DefinitionError, logger *slog.Logger) error {
 	agentsRoot := filepath.Join(root, workspace.Name, catalog.AgentsDir)
 	ids, err := subdirIDs(agentsRoot)
 	if err != nil {
@@ -114,16 +142,23 @@ func loadAgents(root string, def *Definition, defErr *DefinitionError) error {
 		return err
 	}
 	for _, id := range ids {
+		rel := definitionRel(catalog.AgentsDir, id)
 		a, err := catalog.Load(agentsRoot, id)
 		if err != nil {
 			defErr.Malformed = append(defErr.Malformed, SourceError{ID: id, Err: err})
+			logger.Warn("definition rejected", "phase", "validate", "kind", "agent",
+				"id", id, "definition", rel, "result", "malformed", "reason", err.Error())
 			continue
 		}
 		if err := a.Validate(); err != nil {
 			defErr.Invalid = append(defErr.Invalid, err)
+			logger.Warn("definition rejected", "phase", "validate", "kind", "agent",
+				"id", id, "definition", rel, "result", "invalid", "reason", err.Error())
 			continue
 		}
 		def.Agents = append(def.Agents, a)
+		logger.Info("definition accepted", "phase", "validate", "kind", "agent",
+			"id", id, "definition", rel, "result", "valid")
 	}
 	return nil
 }
@@ -137,7 +172,7 @@ func loadAgents(root string, def *Definition, defErr *DefinitionError) error {
 // Unlike prompts.List — which silently skips a corrupt file to keep `list`
 // usable — the build must be honest about every problem, so we enumerate the ids
 // ourselves and surface each failure instead of hiding it.
-func loadCommands(root string, def *Definition, defErr *DefinitionError) error {
+func loadCommands(root string, def *Definition, defErr *DefinitionError, logger *slog.Logger) error {
 	promptsRoot := filepath.Join(root, workspace.Name, prompts.PromptsDir)
 	ids, err := promptIDs(promptsRoot)
 	if err != nil {
@@ -147,9 +182,12 @@ func loadCommands(root string, def *Definition, defErr *DefinitionError) error {
 		return err
 	}
 	for _, id := range ids {
+		rel := definitionRel(prompts.PromptsDir, id+prompts.FileExt)
 		p, err := prompts.Load(promptsRoot, id)
 		if err != nil {
 			defErr.Malformed = append(defErr.Malformed, SourceError{ID: id, Err: err})
+			logger.Warn("definition rejected", "phase", "validate", "kind", "command",
+				"id", id, "definition", rel, "result", "malformed", "reason", err.Error())
 			continue
 		}
 		// Compose the body so the emitted command is self-contained: an unresolved
@@ -158,6 +196,8 @@ func loadCommands(root string, def *Definition, defErr *DefinitionError) error {
 		body, err := prompts.Resolve(promptsRoot, id)
 		if err != nil {
 			defErr.Malformed = append(defErr.Malformed, SourceError{ID: id, Err: err})
+			logger.Warn("definition rejected", "phase", "validate", "kind", "command",
+				"id", id, "definition", rel, "result", "malformed", "reason", err.Error())
 			continue
 		}
 		def.Commands = append(def.Commands, Command{
@@ -165,8 +205,19 @@ func loadCommands(root string, def *Definition, defErr *DefinitionError) error {
 			Description: p.Title,
 			Body:        body,
 		})
+		logger.Info("definition accepted", "phase", "validate", "kind", "command",
+			"id", id, "definition", rel, "result", "valid")
 	}
 	return nil
+}
+
+// definitionRel renders a canonical definition's location as a workspace-relative,
+// slash-separated path (e.g. ".daedalus/agents/my-agent"), the form every
+// per-definition log event uses so the trace points at the exact source without
+// leaking an absolute path (R5/CA5) and reads identically across operating
+// systems (RNF-5).
+func definitionRel(domainDir, leaf string) string {
+	return filepath.ToSlash(filepath.Join(workspace.Name, domainDir, leaf))
 }
 
 // subdirIDs lists the agent ids materialized under agentsRoot — the
