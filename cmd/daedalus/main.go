@@ -4390,6 +4390,9 @@ func writePreview(stdout io.Writer, plan *workspace.Plan) {
 	for _, file := range plan.MissingFiles {
 		fmt.Fprintf(stdout, "  + %s (file)\n", filepath.ToSlash(file))
 	}
+	for _, file := range plan.MissingTrackedFiles {
+		fmt.Fprintf(stdout, "  + %s (file)\n", filepath.ToSlash(file))
+	}
 }
 
 // writeResult reports the outcome of an applied init, choosing wording that

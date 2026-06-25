@@ -50,6 +50,25 @@ var RootArtifacts = []string{
 	"init.md",
 }
 
+// StateReadme is the workspace-relative path of the tracked placeholder inside
+// the progress-state directory. Git does not track empty directories, so this
+// file is what makes `.daedalus/.state/` a *git-tracked* location (RF-8.1, PRD
+// §8.2, init.md §4.2): it anchors the directory in the repository and documents
+// that the state held there is canonical, versioned and must not be ignored. Its
+// content is static and deterministic (see renderStateReadme).
+const StateReadme = ".state/README.md"
+
+// TrackedFiles are placeholder files materialized *inside* canonical
+// subdirectories (as opposed to RootArtifacts, which sit at the workspace root)
+// whose purpose is to make an otherwise-empty directory git-trackable. They are
+// listed separately from RootArtifacts because they are an implementation detail
+// of git's "no empty directories" behavior rather than first-class workspace
+// artifacts, but they share the same deterministic-content and non-destructive
+// guarantees. Paths are workspace-relative and use forward slashes.
+var TrackedFiles = []string{
+	StateReadme,
+}
+
 // Plan is the result of detecting an existing (or absent) workspace against the
 // canonical structure. It is a pure description of the intended changes: holding
 // a Plan performs no writes, so callers can present it as a preview before
@@ -81,13 +100,19 @@ type Plan struct {
 	// order. Paths are workspace-relative (e.g. "agents", "init.md").
 	MissingDirs  []string
 	MissingFiles []string
+	// MissingTrackedFiles are the in-subdirectory placeholder files (TrackedFiles,
+	// e.g. ".state/README.md") that are absent and would be created by Apply, in
+	// deterministic order. They are kept distinct from MissingFiles so existing
+	// callers that reason about root artifacts are unaffected, while Apply still
+	// materializes them so the directories they anchor become git-tracked.
+	MissingTrackedFiles []string
 }
 
 // IsEmpty reports whether the plan would create nothing, i.e. the existing
 // structure is already complete. A re-run that yields an empty plan is the
 // idempotent case: there is nothing to upgrade.
 func (p *Plan) IsEmpty() bool {
-	return len(p.MissingDirs) == 0 && len(p.MissingFiles) == 0
+	return len(p.MissingDirs) == 0 && len(p.MissingFiles) == 0 && len(p.MissingTrackedFiles) == 0
 }
 
 // Result describes what Apply (or Create) produced, so callers can report it to
@@ -184,6 +209,18 @@ func DetectWithOptions(root string, opts Options) (*Plan, error) {
 		}
 	}
 
+	for _, rel := range TrackedFiles {
+		// rel is a slash-separated workspace-relative path; FromSlash makes it a
+		// native path before joining so the stat works on every OS.
+		exists, err := fileExists(filepath.Join(wsPath, filepath.FromSlash(rel)))
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			p.MissingTrackedFiles = append(p.MissingTrackedFiles, rel)
+		}
+	}
+
 	return p, nil
 }
 
@@ -220,6 +257,26 @@ func (p *Plan) Apply() (*Result, error) {
 		}
 		if created {
 			res.CreatedFiles = append(res.CreatedFiles, name)
+		}
+	}
+
+	for _, rel := range p.MissingTrackedFiles {
+		content, _ := artifactContent(rel, p.ProjectName, p.Backends)
+		dest := filepath.Join(p.Path, filepath.FromSlash(rel))
+		// The placeholder anchors a subdirectory; on an upgrade where that subdir
+		// already exists it is not in MissingDirs, so ensure the parent exists
+		// before writing. MkdirAll is idempotent and non-destructive.
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return nil, err
+		}
+		created, err := ensureFile(dest, content)
+		if err != nil {
+			return nil, err
+		}
+		if created {
+			// Reported alongside root artifacts so user-facing "files created"
+			// counts stay accurate; the path is workspace-relative like the rest.
+			res.CreatedFiles = append(res.CreatedFiles, rel)
 		}
 	}
 
