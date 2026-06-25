@@ -1,37 +1,41 @@
 # Claude Code Adapter — Usage Guide
 
-> Authored and maintained by C-3PO, technical writer for Daedalus. This guide is for the **end user** of Daedalus, not for internals.
-
----
+> Audience: end users of Daedalus. Authored and maintained by **C-3PO** as the feature is implemented and validated.
+>
+> **Canonical guide:** the full chapter lives in the user manual at
+> [`docs/guide/compiling-to-a-backend.md`](../../../../docs/guide/compiling-to-a-backend.md)
+> — see [The Claude Code backend → `.claude/`](../../../../docs/guide/compiling-to-a-backend.md#the-claude-code-backend--claude)
+> ([manual index](../../../../docs/README.md)). This file is a pointer and summary; the manual is the growing source of truth.
 
 ## Overview
 
-_To be completed by C-3PO after implementation._
+When `daedalus.yaml` targets **Claude Code**, `daedalus build` compiles your
+canonical `.daedalus/` definition into the `.claude/` structure Claude Code reads.
+Output is **deterministic** (same `.daedalus/` → same `.claude/`, byte for byte)
+and file names are **kebab-case**, derived from each item's canonical id.
 
-## How to use
+## What it generates under `.claude/`
 
-When your `daedalus.yaml` targets the Claude Code backend, running a build compiles your canonical definition into the `.claude/` structure that Claude Code understands:
+| Canonical source | Generated file | Frontmatter | Body |
+|---|---|---|---|
+| Agent | `.claude/agents/<agent-id>.md` (one per agent) | `name` (agent id), `description` (role), `model` (only if the agent defines it) | The agent's prompt |
+| Prompt — `.daedalus/prompts/` (global **and** shared) | `.claude/commands/<prompt-id>.md` (one per prompt) | `description` (the prompt's title; omitted if none) | The **resolved** prompt (inclusions expanded inline; self-contained) |
+| — | `.claude/settings.json` | — | `$schema` + a `daedalus` managed/generator marker |
 
-```
-daedalus build
-```
-
-This produces:
-
-- `.claude/agents/*.md` — one Markdown file per agent, with frontmatter (metadata) followed by the agent prompt.
-- `.claude/commands/*.md` — command files derived from your canonical definition.
-- Claude Code settings — the relevant configuration for the backend.
-
-You edit clean canonical definitions in `.daedalus/`; Daedalus generates the native Claude Code files for you. You never hand-edit `.claude/` to keep them in sync.
-
-## Options / flags
-
-- _The adapter runs as part of `daedalus build`; see the build/sync guide for command flags._
-- _Adapter-specific notes to be completed by C-3PO after implementation._
+**Prompts are your slash commands.** Every workspace prompt becomes a Claude Code
+slash command under `.claude/commands/` — author a prompt once, invoke it as a
+slash command after a build.
 
 ## Notes & limitations
 
-- Output is deterministic: the same canonical definition always produces the same `.claude/` files (this is what makes golden-file testing possible).
-- File names are derived from the canonical agent/command id in `kebab-case`.
-- The adapter interface is extensible: additional backends can be added later without changing the core. In this phase, **Claude Code is the only implemented backend**.
-- **Phase 1: Daedalus configures the AI structure; it does not execute agents.** You run the agents in Claude Code yourself after building.
+- **Daedalus generates only what you defined.** `settings.json` is intentionally
+  minimal — no `permissions`, `env`, `hooks`, or default `model` are fabricated.
+  Agent frontmatter does **not** include `tools` or `color` in this release.
+- **Deterministic, stable names.** Same canonical input → identical output;
+  kebab-case file names stay stable across builds.
+- **Claude Code is the implemented backend** in this release.
+- **Phase 1:** Daedalus configures the AI structure; it does not execute agents.
+
+See the full chapter — with concrete example output for an agent file, a command
+file, and `settings.json` — in
+[`docs/guide/compiling-to-a-backend.md`](../../../../docs/guide/compiling-to-a-backend.md#the-claude-code-backend--claude).

@@ -58,12 +58,56 @@
 
 ## Verdict
 
-**Estado:** _APPROVED_ / _REJECTED_ — _(a completar por Yoda tras ejecutar los checks.)_
+**Estado:** **APPROVED** — validated by Yoda on 2026-06-25 against the test binary
+`go build -o $TEMP/daedalus-06.exe ./cmd/daedalus` (go 1.26.4 windows/amd64) and the
+package tests. Validated against the orchestrator-confirmed mapping decisions
+(agents/commands/settings), not against invented expectations.
+
+### Evidence (real commands + exit codes)
+
+Health:
+- `go build ./...` → exit 0
+- `go vet ./...` → exit 0
+- `gofmt -l internal cmd` → empty (exit 0)
+- `go test ./... -count=1` → all packages ok
+- `go test ./internal/compile/... -count=1 -v` → all 17 tests PASS, including
+  `TestClaudeGolden`, `TestClaudeCompileDeterministic`, `TestClaudeSettingsIsValidJSON`,
+  `TestAgentRoundTripBuildThenImport`, and the registry routing tests.
+
+Per check (end-to-end via a real `.daedalus/` workspace: 2 agents analyst+architect,
+2 prompts commit-policy[global]+style-guide[shared], backend claude-code):
+
+- Check 1/8 — `Compiler` interface (`Backend()`/`Compile()`, pure, no I/O) +
+  `Registry`/`DefaultRegistry`; `Build` routes via `reg.Lookup(backend)` with no direct
+  Claude coupling. Registry tests use a `fakeCompiler`, proving a new backend is added
+  by registration alone (núcleo untouched). PASS.
+- Check 2 — `.claude/agents/analyst.md` and `architect.md`: one file per agent, YAML
+  frontmatter PARSEABLE, fixed key order `name`/`description`/`model`, no `tools`/`color`,
+  body = prompt. Mapping verified by a full CLI round-trip: importing the built
+  `architect.md` back yields canonical id=architect, role intact, model=default param,
+  prompt intact (`agent import` exit 0). PASS.
+- Check 3 — `.claude/commands/commit-policy.md` (global) and `style-guide.md` (shared):
+  commands derived from BOTH prompt kinds; `description` = title; body = resolved prompt.
+  PASS.
+- Check 4 — `.claude/settings.json` parsed with a real JSON parser (ConvertFrom-Json): OK.
+  Top-level keys exactly `$schema` + `daedalus` (managed=true, generator=daedalus). NO
+  fabricated permissions/env/hooks/model. Trailing newline present. PASS.
+- Check 5 — file names kebab-case, derived from canonical id, stable across runs. PASS.
+- Check 6 — determinism: built the SAME workspace into two clean dirs (A, B). All 5
+  artifacts byte-identical by SHA-256; `git diff --no-index A/.claude B/.claude` → exit 0,
+  no output. PASS.
+- Check 7 — golden comparison: `TestClaudeGolden` passes against
+  `internal/compile/testdata/golden/.claude/` (agents with/without model, role needing
+  quoting, command with/without description, minimal settings). PASS.
+
+End-to-end (06-01 Check 3/7 closure, now that the adapter is real): `daedalus build` on a
+valid `.daedalus/` workspace produced a real `.claude/` (5 artifacts) and exited 0; the
+summary named backend `claude-code` and listed every artifact created. VERIFIED.
 
 ### Hallazgos
 
 | # | Severidad | Check | Observado | Esperado |
 |---|---|---|---|---|
-| | | | | |
+| 1 | info | 2 | Built-in catalog agents carry a `model: default` parameter, so live builds emit `model: default` (a real value, correctly NOT omitted). | Consistent with omit-empty semantics: `model` is emitted because a value exists; absent only when no model param. Confirmed correct, no action. |
 
 > Severidad: `blocker` / `major` / `minor`. Un hallazgo por fila. Si `REJECTED`, el orquestador traslada estos hallazgos a `observations.md`.

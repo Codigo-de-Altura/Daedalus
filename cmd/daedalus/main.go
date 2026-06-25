@@ -25,6 +25,7 @@ import (
 	"github.com/Codigo-de-Altura/Daedalus/internal/backlog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/buildinfo"
 	"github.com/Codigo-de-Altura/Daedalus/internal/catalog"
+	"github.com/Codigo-de-Altura/Daedalus/internal/compile"
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
 	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
 	"github.com/Codigo-de-Altura/Daedalus/internal/specs"
@@ -62,6 +63,10 @@ func run(args []string) int {
 			return runTicket(args[1:], os.Stdout, os.Stderr)
 		case "trace":
 			return runTrace(args[1:], os.Stdout, os.Stderr)
+		case "build", "sync":
+			// `sync` is a documented alias of `build` (REQ-1): both compile the
+			// canonical .daedalus/ definition to the configured backend's native format.
+			return runBuild(args[1:], os.Stdout, os.Stderr)
 		default:
 			fmt.Fprintf(os.Stderr, "daedalus: unknown command %q\nrun 'daedalus --help' for usage\n", args[0])
 			return 2
@@ -259,6 +264,194 @@ func writeSeedPreview(stdout io.Writer, dir string) {
 	fmt.Fprintf(stdout, "  + %s (factory workflow)\n",
 		filepath.ToSlash(filepath.Join(workspace.Name, workflows.WorkflowsDir,
 			workflows.DefaultWorkflowName+workflows.FileExt)))
+}
+
+// Build exit codes. They are differentiated so a caller (a script, a CI gate, a
+// validator) can tell the failure modes apart from the process status alone
+// (REQ-8): a definition that fails validation is a different problem — fixed by
+// editing the canonical sources — than a backend that cannot be compiled or
+// written. Usage errors keep the project-wide exit code 2; the two build-specific
+// failure classes get their own codes above it so they never collide with it.
+const (
+	exitBuildOK         = 0 // success (REQ-8)
+	exitBuildUsage      = 2 // flag/usage error, matching the rest of the CLI
+	exitBuildValidation = 3 // canonical definition failed validation (REQ-3/REQ-8)
+	exitBuildCompile    = 4 // workspace missing, no adapter, compile or write failure (REQ-8)
+)
+
+// runBuild handles `daedalus build` (and its alias `sync`): it compiles the
+// canonical .daedalus/ definition to the configured backend(s)' native format
+// (RF-6.1). It is the thin CLI surface over internal/compile: it parses flags,
+// delegates the whole pipeline to compile.Build (which locates the workspace,
+// validates the definition before writing, routes each backend through the
+// adapter registry and writes the artifacts), renders the summary, and maps the
+// typed errors to differentiated exit codes. --preview computes the plan without
+// writing anything; the deep diff/preview rendering is ticket-06-04's job.
+func runBuild(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus build", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/ workspace is compiled")
+	preview := fs.Bool("preview", false, "show what would be compiled without writing anything (dry run)")
+	yes := fs.Bool("yes", false, "write without the interactive confirmation gate (for CI/non-interactive use)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus build [flags]   (alias: daedalus sync)\n\n"+
+			"Compile the canonical .daedalus/ definition to the native format of the\n"+
+			"backend(s) configured in daedalus.yaml. The definition is validated before\n"+
+			"anything is written; an invalid definition aborts the build with nothing\n"+
+			"changed.\n\n"+
+			"In an interactive terminal, build shows a diff/preview and asks you to\n"+
+			"confirm before writing (RF-6.4). --preview shows the diff and never writes.\n"+
+			"--yes writes without the gate (CI). Without a terminal and without --yes,\n"+
+			"build prints the diff and writes nothing.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitBuildOK
+		}
+		return exitBuildUsage
+	}
+
+	logger := logging.New(stderr)
+
+	// --yes is the non-interactive write path (CI), valid with or without a TTY: it
+	// reuses the original compile.Build + summary flow with no gate. --preview takes
+	// precedence over --yes if both are passed (preview never writes), so an
+	// explicit dry-run request is always honored.
+	if *yes && !*preview {
+		out, err := compile.Build(compile.Options{Root: *dir, Preview: false, Logger: logger})
+		if err != nil {
+			return writeBuildError(stderr, err)
+		}
+		writeBuildSummary(stdout, out)
+		return exitBuildOK
+	}
+
+	// Interactive terminal: launch the diff/preview TUI. In --preview it is
+	// read-only (view + quit, never writes); otherwise it gates the write behind an
+	// explicit confirmation (RF-6.4/RNF-8).
+	if isInteractive() {
+		return runBuildInteractive(*dir, *preview, stdout, stderr, logger)
+	}
+
+	// No terminal and no --yes (or --preview without a terminal): print the textual
+	// diff/plan and write nothing. The plan runs the same validate-before-anything
+	// pipeline, so a missing workspace or invalid definition still fails with the
+	// right exit code — just with nothing written.
+	return runBuildTextualPreview(*dir, *preview, stdout, stderr, logger)
+}
+
+// runBuildInteractive launches the Bubble Tea build preview and maps its outcome
+// to the build exit codes. readOnly is --preview (no confirm/write). On confirm
+// the model invokes compile.Build itself (through the tui package), recompiling at
+// confirm time (TOCTOU-safe); here we only render the result and pick the code.
+func runBuildInteractive(dir string, readOnly bool, stdout, stderr io.Writer, logger *slog.Logger) int {
+	res, err := tui.RunBuildPreview(dir, readOnly)
+	if err != nil {
+		logger.Error("build preview failed", "err", err)
+		fmt.Fprintf(stderr, "daedalus: build preview failed: %v\n", err)
+		return exitBuildCompile
+	}
+
+	switch {
+	case res.PlanErr != nil:
+		return writeBuildError(stderr, res.PlanErr)
+	case res.WriteErr != nil:
+		fmt.Fprintf(stderr, "daedalus: build failed: %v\n", res.WriteErr)
+		return exitBuildCompile
+	case res.Wrote:
+		writeBuildSummary(stdout, res.Outcome)
+		return exitBuildOK
+	case res.NoChanges:
+		fmt.Fprintln(stdout, "Nothing to write — everything is already up to date.")
+		return exitBuildOK
+	default:
+		// Cancelled, or quit a read-only preview: nothing was written.
+		fmt.Fprintln(stdout, "Cancelled — nothing was written.")
+		return exitBuildOK
+	}
+}
+
+// runBuildTextualPreview computes the plan and prints it as text WITHOUT writing,
+// for the no-TTY paths: `--preview` piped/in CI, and a plain `build` with neither
+// a terminal nor --yes. The second case adds a clear notice that nothing was
+// written and how to write (RF-6.4 decision: never write without a confirmation or
+// --yes). Exit 0 on success; plan failures map to the usual build exit codes.
+func runBuildTextualPreview(dir string, explicitPreview bool, stdout, stderr io.Writer, logger *slog.Logger) int {
+	res, err := compile.Plan(compile.Options{Root: dir, Logger: logger})
+	if err != nil {
+		return writeBuildError(stderr, err)
+	}
+
+	tui.RenderPlanText(stdout, res)
+
+	if !explicitPreview {
+		// A plain `build` with no terminal and no --yes is a safe dry run: say so and
+		// tell the user how to actually write.
+		fmt.Fprintln(stdout, "\nNothing written; pass --yes to write, or run in a terminal to confirm.")
+	}
+	return exitBuildOK
+}
+
+// writeBuildError renders a build failure on stderr and returns the matching
+// exit code, distinguishing the failure classes REQ-8 requires. A validation
+// error is rendered finding-by-finding (the canonical sources to fix); the
+// workspace-missing, no-adapter, compile and write failures are rendered as a
+// single actionable line and share the compile/write exit code.
+func writeBuildError(stderr io.Writer, err error) int {
+	switch {
+	case compile.IsDefinitionInvalid(err):
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return exitBuildValidation
+	case errors.Is(err, compile.ErrWorkspaceNotFound):
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		fmt.Fprint(stderr, "run 'daedalus init' to create the workspace first\n")
+		return exitBuildCompile
+	case errors.Is(err, compile.ErrNoAdapter):
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return exitBuildCompile
+	default:
+		// A malformed manifest, a compile failure (incl. the not-yet-implemented
+		// adapter) or an I/O write failure: all compilation/write errors (REQ-8).
+		fmt.Fprintf(stderr, "daedalus: build failed: %v\n", err)
+		return exitBuildCompile
+	}
+}
+
+// writeBuildSummary reports the outcome of a build on stdout: per backend, what
+// was (or would be) created/updated/left unchanged, plus any detected orphans
+// (REQ-7). The core classifies every artifact in both modes — a preview reports
+// exactly what a real run would do — so the wording differs only in tense; the
+// numbers come from the same plan. The deep per-file diff and the confirmation
+// gate are ticket-06-04's job; this is the plain, deterministic summary it builds
+// on. Paths are already slash-normalized by the core (RNF-5).
+func writeBuildSummary(stdout io.Writer, out *compile.Outcome) {
+	if out.Preview {
+		fmt.Fprintf(stdout, "Preview of compiling %s (no files written):\n", filepath.ToSlash(out.Root))
+	} else {
+		fmt.Fprintf(stdout, "Compiled %s:\n", filepath.ToSlash(out.Root))
+	}
+	for _, b := range out.Backends {
+		verbCreate, verbUpdate := "created", "updated"
+		if out.Preview {
+			verbCreate, verbUpdate = "to create", "to update"
+		}
+		fmt.Fprintf(stdout, "  %s: %d %s, %d %s, %d unchanged (of %d artifact%s)\n",
+			b.Backend, len(b.Created), verbCreate, len(b.Updated), verbUpdate,
+			len(b.Unchanged), b.Planned, plural(b.Planned, "", "s"))
+		for _, f := range b.Created {
+			fmt.Fprintf(stdout, "    + %s\n", f)
+		}
+		for _, f := range b.Updated {
+			fmt.Fprintf(stdout, "    ~ %s\n", f)
+		}
+		// Orphans are surfaced but never deleted (safe default, RF-6.3). The note
+		// makes the managed-area boundary visible without acting on it; RF-6.4's
+		// preview is where the user decides what to do with them.
+		for _, f := range b.Orphans {
+			fmt.Fprintf(stdout, "    ? %s (orphan: no longer produced; left untouched)\n", f)
+		}
+	}
 }
 
 // runAgent handles the `daedalus agent` subcommand, a thin CLI surface over the

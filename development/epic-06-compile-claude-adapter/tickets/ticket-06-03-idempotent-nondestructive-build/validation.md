@@ -58,12 +58,53 @@
 
 ## Verdict
 
-**Estado:** _APPROVED_ / _REJECTED_ — _(a completar por Yoda tras ejecutar los checks.)_
+**Estado:** **APPROVED** — validated by Yoda on 2026-06-25 against the test binary
+`go build -o $TEMP/daedalus-06.exe ./cmd/daedalus` (go 1.26.4 windows/amd64) and the
+package tests. Validated against the orchestrator-confirmed scope: managed area = the
+exact produced path set; compare-and-skip idempotency (no mtime churn); orphans
+detected + reported but NEVER deleted (safe default; auto-delete is RF-6.4).
+
+### Evidence (real commands + exit codes)
+
+Health:
+- `go build ./...` → exit 0 · `go vet ./...` → exit 0 · `gofmt -l internal cmd` → empty
+- `go test ./... -count=1` → all packages ok
+- `go test ./internal/compile/... -count=1 -v` → all 24 tests PASS, including
+  `TestIdempotentSecondRunNoChanges`, `TestIdempotentManyRunsIdentical`,
+  `TestNonDestructionForeignFiles`, `TestBoundedRegeneration`,
+  `TestOrphanDetectedNotDeleted`, `TestPlanArtifactsClassifies`,
+  `TestDeterministicAcrossCleanDirs`. 06-02 goldens (`TestClaudeGolden`) still pass.
+
+Per check (real workspace: 2 agents analyst+architect, 2 prompts commit-policy[global]
++ style-guide[shared], backend claude-code; 5 artifacts):
+
+- Check 1/2 — idempotency: build #1 = "5 created"; builds #2 and #3 = "0 created,
+  0 updated, 5 unchanged", exit 0 each. Snapshot across all 3 runs: every artifact's
+  SHA-256 **and mtime** stable → compare-and-skip writes nothing on an unchanged run
+  (no mtime churn, no spurious writes). PASS.
+- Check 3 — determinism: same workspace built into two clean dirs A, B;
+  `git diff --no-index A/.claude B/.claude` → exit 0, no output (byte-identical). PASS.
+- Check 4 — golden reference: `TestClaudeGolden` passes against
+  `internal/compile/testdata/golden/.claude/`. PASS.
+- Check 5 — no volatile data: grep of the generated `.claude/` for absolute paths,
+  ISO timestamps, AppData, temp markers, long epoch numbers → no matches. PASS.
+- Check 6 — non-destruction: a manual `.claude/agents/manual-note.md` (inside the
+  managed tree, not produced) AND a `MY-NOTES.md` (outside `.claude/`) both survive a
+  rebuild byte-identical; the in-tree manual file is reported as an orphan ("left
+  untouched"), never deleted. Produced 5 stay unchanged. PASS.
+- Check 7 — bounded regeneration: editing the analyst canonical prompt → "1 updated,
+  4 unchanged"; exactly `.claude/agents/analyst.md` changed (content + mtime); the
+  other 4 artifacts unchanged with stable mtime; nothing outside the managed area
+  touched. PASS.
+- Check 8 — safe default: removing the architect canonical source made
+  `.claude/agents/architect.md` an orphan; the rebuild DETECTED + REPORTED it
+  (`orphans:1`, "left untouched") and PRESERVED it byte-identical — did NOT delete it.
+  Default is non-destructive. PASS.
 
 ### Hallazgos
 
 | # | Severidad | Check | Observado | Esperado |
 |---|---|---|---|---|
-| | | | | |
+| 1 | info | 6, 8 | Orphans (files in a managed dir no longer produced) are detected and reported as `? ... (orphan: ... left untouched)` but not deleted. | Confirmed CORRECT per scope: safe default in 06-03; auto-delete/fine-grained handling is RF-6.4. Not a defect. |
 
 > Severidad: `blocker` / `major` / `minor`. Un hallazgo por fila. Si `REJECTED`, el orquestador traslada estos hallazgos a `observations.md`.

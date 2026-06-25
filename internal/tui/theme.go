@@ -47,6 +47,24 @@ type theme struct {
 	// dagEdge styles the vertical connectors drawn between nodes so the pipeline's
 	// direction (predecessor → successor) is legible.
 	dagEdge lipgloss.Style
+
+	// --- build preview / diff view (ticket 06-04) ---
+	// summaryBox styles the build preview's per-backend summary header (counts).
+	summaryBox lipgloss.Style
+	// statusCreated/statusUpdated/statusUnchanged style the per-artifact status
+	// badge in the artifact list so the classification reads at a glance (REQ-6).
+	statusCreated   lipgloss.Style
+	statusUpdated   lipgloss.Style
+	statusUnchanged lipgloss.Style
+	// statusOrphan styles the orphan badge (detected, never deleted — info only).
+	statusOrphan lipgloss.Style
+	// diffAdd/diffRemove/diffContext style the +/-/ context lines of a content diff
+	// so added and removed lines are unmistakable (REQ-3).
+	diffAdd     lipgloss.Style
+	diffRemove  lipgloss.Style
+	diffContext lipgloss.Style
+	// confirmPrompt styles the confirmation gate's call to action (write/cancel).
+	confirmPrompt lipgloss.Style
 }
 
 // defaultTheme builds the shared theme. Colors use 256-color codes so the look
@@ -57,6 +75,12 @@ func defaultTheme() theme {
 	accent := lipgloss.Color("63")
 	muted := lipgloss.Color("245")
 	danger := lipgloss.Color("203")
+	// Diff/status palette: green for additions/created, amber for updates,
+	// muted for unchanged/context, danger for removals. Anchored on the same
+	// 256-color codes the rest of the theme uses so the look stays stable.
+	added := lipgloss.Color("42")
+	removed := lipgloss.Color("203")
+	changed := lipgloss.Color("214")
 
 	return theme{
 		accent: accent,
@@ -97,6 +121,30 @@ func defaultTheme() theme {
 		dagMeta: lipgloss.NewStyle().
 			Foreground(muted),
 		dagEdge: lipgloss.NewStyle().
+			Foreground(accent),
+		summaryBox: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(accent).
+			Padding(0, 1),
+		statusCreated: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(added),
+		statusUpdated: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(changed),
+		statusUnchanged: lipgloss.NewStyle().
+			Foreground(muted),
+		statusOrphan: lipgloss.NewStyle().
+			Foreground(muted).
+			Italic(true),
+		diffAdd: lipgloss.NewStyle().
+			Foreground(added),
+		diffRemove: lipgloss.NewStyle().
+			Foreground(removed),
+		diffContext: lipgloss.NewStyle().
+			Foreground(muted),
+		confirmPrompt: lipgloss.NewStyle().
+			Bold(true).
 			Foreground(accent),
 	}
 }
