@@ -72,25 +72,24 @@ func TestLoadAreaCmdAgentsListsCatalog(t *testing.T) {
 }
 
 // TestLoadSubCmdPromptComposesInclusions verifies the prompt sub-screen loader
-// returns the composed text with inclusions resolved (not the raw directive),
-// flagged as markdown for Glamour rendering.
+// returns the composed text with inclusions resolved (not the raw directive). The
+// markdown is now rendered off the UI thread inside loadSubCmd, so the delivered
+// content is the final rendered body (asserted on its visible text).
 func TestLoadSubCmdPromptComposesInclusions(t *testing.T) {
 	workdir := t.TempDir()
 	writePrompt(t, workdir, prompts.Prompt{ID: "frag", Kind: prompts.KindShared, Title: "Frag", Body: "FRAGMENT-BODY"})
 	writePrompt(t, workdir, prompts.Prompt{ID: "host", Kind: prompts.KindGlobal, Title: "Host", Body: "before\n{{include: frag}}\nafter"})
 
-	msg := loadSubCmd(workdir, areaPrompts, "host")().(subLoadedMsg)
+	msg := loadSubCmd(workdir, areaPrompts, "host", defaultTheme(), 72)().(subLoadedMsg)
 	if msg.err != nil {
 		t.Fatalf("unexpected error: %v", msg.err)
 	}
-	if !msg.markdown {
-		t.Error("a composed prompt should be rendered as markdown")
+	visible := visibleText(msg.content)
+	if !strings.Contains(visible, "FRAGMENT-BODY") {
+		t.Errorf("composed content should include the fragment body, got:\n%s", visible)
 	}
-	if !strings.Contains(msg.content, "FRAGMENT-BODY") {
-		t.Errorf("composed content should include the fragment body, got:\n%s", msg.content)
-	}
-	if strings.Contains(msg.content, "{{include:") {
-		t.Errorf("composed content should not contain raw include directives, got:\n%s", msg.content)
+	if strings.Contains(visible, "{{include:") {
+		t.Errorf("composed content should not contain raw include directives, got:\n%s", visible)
 	}
 }
 
@@ -101,7 +100,7 @@ func TestLoadSubCmdPromptCycleError(t *testing.T) {
 	writePrompt(t, workdir, prompts.Prompt{ID: "a", Kind: prompts.KindGlobal, Title: "A", Body: "{{include: b}}"})
 	writePrompt(t, workdir, prompts.Prompt{ID: "b", Kind: prompts.KindShared, Title: "B", Body: "{{include: a}}"})
 
-	msg := loadSubCmd(workdir, areaPrompts, "a")().(subLoadedMsg)
+	msg := loadSubCmd(workdir, areaPrompts, "a", defaultTheme(), 72)().(subLoadedMsg)
 	if msg.err == nil {
 		t.Fatal("expected a composition error for the cycle")
 	}

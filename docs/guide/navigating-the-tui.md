@@ -271,6 +271,29 @@ inside a form is `?`, which opens the help rather than typing a literal `?`.)
 
 Shortcuts are fixed in this version of Daedalus; they cannot be remapped.
 
+## Responsiveness
+
+The interface is built to stay out of your way:
+
+- **It responds instantly.** Moving between areas, opening and scrolling
+  documents, and using forms react the moment you press a key — the interface
+  never freezes while you work.
+- **Slow work happens in the background.** When something takes a moment — loading
+  an area's contents, or rendering a large document — Daedalus shows `Loading…`
+  instead of locking up, and you can always press `esc` to go back or cancel
+  while it works.
+- **It starts fast.** The interface opens effectively instantly.
+- **It is quiet when idle.** While you are not interacting, Daedalus uses no
+  noticeable CPU — there are no constant animations or redraws burning cycles in
+  the background.
+- **It stays stable over a long session.** Navigating in and out of areas
+  repeatedly does not slow the interface down or let its memory creep up.
+
+> Known limitation: if you resize your terminal window while a Markdown document
+> is open, the document keeps its previous width until you close and reopen it.
+> Reopening the document re-wraps it to the new size. This affects only the open
+> document view, not navigation.
+
 ---
 
 > Phase 1 note: Daedalus configures your project's AI structure; it does not

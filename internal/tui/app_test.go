@@ -323,8 +323,12 @@ func deliverAreaLoaded(m Model, id areaID, items []areaItem) Model {
 	return updated.(Model)
 }
 
+// deliverSubLoaded injects a final (already-rendered) sub-screen body, as the
+// off-thread loadSubCmd would produce it. Markdown rendering now happens inside the
+// command (07-04), so the content delivered here is the finished body the viewport
+// stores verbatim.
 func deliverSubLoaded(m Model, id areaID, key, content string) Model {
-	updated, _ := m.Update(subLoadedMsg{id: id, key: key, content: content, markdown: true})
+	updated, _ := m.Update(subLoadedMsg{id: id, key: key, content: content})
 	return updated.(Model)
 }
 

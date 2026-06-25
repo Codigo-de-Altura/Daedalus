@@ -87,9 +87,10 @@ func TestMarkdownTinyWidthClamped(t *testing.T) {
 	}
 }
 
-// TestPromptPreviewRendersMarkdown verifies the prompt preview sub-screen renders
-// its content as markdown through the shared renderer (R3 applied where documents
-// are shown).
+// TestPromptPreviewRendersMarkdown verifies the prompt preview sub-screen shows a
+// rendered markdown body. The render now happens off the UI thread in loadSubCmd, so
+// we render the body the same way the command does and deliver the final content,
+// then assert it reaches the view.
 func TestPromptPreviewRendersMarkdown(t *testing.T) {
 	m := sizedModel(t)
 	m, _ = enterAreaByIndex(t, m, indexOf(areaPrompts))
@@ -97,7 +98,10 @@ func TestPromptPreviewRendersMarkdown(t *testing.T) {
 		{key: "intro", label: "intro", opens: true},
 	})
 	m = update(m, "enter") // open the preview sub-screen
-	m = deliverSubLoaded(m, areaPrompts, "intro", "# Heading\n\n- a\n- b")
+
+	// Mirror the off-thread render the command performs, then deliver the final body.
+	rendered := defaultTheme().renderMarkdownWidth("# Heading\n\n- a\n- b", 72)
+	m = deliverSubLoaded(m, areaPrompts, "intro", rendered)
 
 	view := visibleText(m.View())
 	if !strings.Contains(view, "Heading") {

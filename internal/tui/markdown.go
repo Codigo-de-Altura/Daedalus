@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"sync"
+
 	"github.com/charmbracelet/glamour"
 )
 
@@ -10,28 +12,28 @@ import (
 // so they all look identical and on-theme. It is presentation only: it formats a
 // string, it never reads a file or runs domain logic.
 //
-// Two things the 07-01 review asked us to get right are handled here:
-//   - The render is themed (headings, lists, tables, code, emphasis use the
-//     palette via theme.markdownStyle), not Glamour's stock colors.
-//   - The render is width-bounded to the viewport, so Glamour's H1 background
-//     banner and long lines wrap inside the frame instead of overflowing it
-//     (the "wide colored block" finding).
+// Performance (ticket-07-04): constructing a Glamour TermRenderer is relatively
+// expensive (it parses the style config and builds a chroma highlighter). The
+// render itself is invoked OFF the UI thread (inside loadSubCmd, see commands.go),
+// so a large document never blocks the Bubble Tea loop. On top of that, the
+// renderers are cached per wrap width (see rendererCache) so navigating in and out
+// of documents at a stable terminal size reuses one renderer instead of
+// reallocating it every time — keeping memory bounded under repeated navigation.
 
 // renderMarkdownWidth renders markdown text to themed, terminal-formatted output
 // wrapped to wrap columns. It is the single entry point for markdown rendering so
-// the look and the width handling live in exactly one place. On any renderer
-// construction or render failure it falls back to the raw text, so a document is
-// always shown rather than the screen breaking — a malformed style or an exotic
-// document can never blank the preview.
+// the look and the width handling live in exactly one place. It reuses a cached
+// renderer for the given width when possible. On any renderer construction or
+// render failure it falls back to the raw text, so a document is always shown
+// rather than the screen breaking.
+//
+// It is safe to call from a tea.Cmd goroutine: the renderer cache is mutex-guarded.
 func (t theme) renderMarkdownWidth(text string, wrap int) string {
 	if wrap < minMarkdownWrap {
 		wrap = minMarkdownWrap
 	}
-	r, err := glamour.NewTermRenderer(
-		glamour.WithStyles(t.markdownStyle()),
-		glamour.WithWordWrap(wrap),
-	)
-	if err != nil {
+	r := t.renderer(wrap)
+	if r == nil {
 		return text
 	}
 	out, err := r.Render(text)
@@ -46,14 +48,61 @@ func (t theme) renderMarkdownWidth(text string, wrap int) string {
 // column.
 const minMarkdownWrap = 20
 
-// renderMarkdown renders markdown for the shared sub-screen viewport, wrapping to
-// the viewport width minus the frame padding so wrapped lines — and Glamour's
-// background-colored headings — fit inside the bordered panel without a horizontal
-// scrollbar. It delegates the actual rendering to the theme component so the model
-// holds no markdown logic of its own.
-func (m Model) renderMarkdown(text string) string {
-	width, _ := m.subViewportSize()
-	// Subtract the frame's horizontal border+padding (2 cols) so content fits inside
-	// previewFrame; the component clamps to a sane minimum.
-	return m.theme.renderMarkdownWidth(text, width-2)
+// maxCachedRenderers bounds the renderer cache so it can never grow without limit:
+// only a handful of distinct widths occur in practice (the terminal is one width at
+// a time; a resize adds at most a few). When the bound is exceeded the cache is
+// cleared wholesale rather than carrying an ever-growing map (requirement: any cache
+// we add must be bounded). A small constant keeps memory flat under heavy use.
+const maxCachedRenderers = 8
+
+// rendererCache memoizes Glamour renderers by wrap width. The theme/style is fixed
+// for the process (defaultTheme is a singleton in practice), so the width is the
+// only thing that varies a renderer; keying by width is sufficient and keeps the
+// cache tiny. It is package-level and mutex-guarded because renders run in tea.Cmd
+// goroutines (off the UI thread), so lookups can race.
+var rendererCache = struct {
+	mu sync.Mutex
+	m  map[int]*glamour.TermRenderer
+}{m: make(map[int]*glamour.TermRenderer)}
+
+// renderer returns a Glamour renderer for the given wrap width, building and
+// caching one on first use. A construction failure returns nil (the caller falls
+// back to raw text). The cache is bounded by maxCachedRenderers: exceeding it clears
+// the map, so the working set stays small and memory does not grow with navigation.
+func (t theme) renderer(wrap int) *glamour.TermRenderer {
+	rendererCache.mu.Lock()
+	defer rendererCache.mu.Unlock()
+
+	if r, ok := rendererCache.m[wrap]; ok {
+		return r
+	}
+
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStyles(t.markdownStyle()),
+		glamour.WithWordWrap(wrap),
+	)
+	if err != nil {
+		return nil
+	}
+
+	if len(rendererCache.m) >= maxCachedRenderers {
+		// Bounded: drop the whole map rather than let it grow unbounded. The few live
+		// widths will be rebuilt lazily on next use.
+		rendererCache.m = make(map[int]*glamour.TermRenderer, maxCachedRenderers)
+	}
+	rendererCache.m[wrap] = r
+	return r
+}
+
+// markdownWrapForWidth converts a viewport width to the wrap width used for the
+// sub-screen body: it subtracts the frame's horizontal border+padding (2 cols) so
+// rendered content fits inside previewFrame, and clamps to a sane minimum. It is
+// the single place the open-time wrap is computed, so the command (off-thread) and
+// any direct caller agree.
+func markdownWrapForWidth(viewportWidth int) int {
+	wrap := viewportWidth - 2
+	if wrap < minMarkdownWrap {
+		wrap = minMarkdownWrap
+	}
+	return wrap
 }

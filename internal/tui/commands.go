@@ -43,15 +43,15 @@ type areaLoadedMsg struct {
 
 // subLoadedMsg reports the result of loading one row's detail for a sub-screen.
 // id/key echo which area and row were requested so a late-arriving result for a
-// row the user navigated away from can be ignored. content holds the rendered body
-// on success; markdown reports whether content should be Glamour-rendered (R3) or
-// shown as a pre-formatted block (e.g. the build plan); err holds a load failure.
+// row the user navigated away from can be ignored. content is the FINAL, ready-to-
+// display body — any markdown rendering already happened off the UI thread inside
+// loadSubCmd (07-04), so Update only stores it into the viewport with no heavy work.
+// err holds a load failure.
 type subLoadedMsg struct {
-	id       areaID
-	key      string
-	content  string
-	markdown bool
-	err      error
+	id      areaID
+	key     string
+	content string
+	err     error
 }
 
 // loadAreaCmd lists the rows for one area off the UI thread and delivers an
@@ -66,11 +66,18 @@ func loadAreaCmd(workdir string, id areaID) tea.Cmd {
 }
 
 // loadSubCmd loads one row's detail off the UI thread and delivers a subLoadedMsg.
-// key is echoed back so Update can discard a stale result.
-func loadSubCmd(workdir string, id areaID, key string) tea.Cmd {
+// key is echoed back so Update can discard a stale result. Crucially, the markdown
+// render (the only potentially heavy presentation work) happens HERE, in the
+// goroutine, not in Update — so even a large document never blocks the Bubble Tea
+// loop (07-04 R2). The wrap width is captured by the caller at open time so the
+// off-thread render matches the viewport; th provides the themed Glamour style.
+func loadSubCmd(workdir string, id areaID, key string, th theme, wrap int) tea.Cmd {
 	return func() tea.Msg {
 		content, markdown, err := loadSub(workdir, id, key)
-		return subLoadedMsg{id: id, key: key, content: content, markdown: markdown, err: err}
+		if err == nil && markdown {
+			content = th.renderMarkdownWidth(content, wrap)
+		}
+		return subLoadedMsg{id: id, key: key, content: content, err: err}
 	}
 }
 

@@ -266,7 +266,12 @@ func (m Model) openSub() (tea.Model, tea.Cmd) {
 		m.viewport.SetContent("")
 		m.viewport.GotoTop()
 	}
-	return m, loadSubCmd(m.workdir, m.active, item.key)
+	// The detail (including any markdown render) is produced entirely off the UI
+	// thread by the command, so a large document never blocks the loop (07-04 R2).
+	// The wrap width is captured here, at open time, so the off-thread render matches
+	// the current viewport.
+	vpWidth, _ := m.subViewportSize()
+	return m, loadSubCmd(m.workdir, m.active, item.key, m.theme, markdownWrapForWidth(vpWidth))
 }
 
 // handleSubLoaded stores an opened sub-screen's rendered content (or its load
@@ -286,11 +291,9 @@ func (m Model) handleSubLoaded(msg subLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 	st.sub = subReady
 	if m.viewportReady {
-		content := msg.content
-		if msg.markdown {
-			content = m.renderMarkdown(content)
-		}
-		m.viewport.SetContent(content)
+		// content is already final (markdown, if any, was rendered off the UI thread in
+		// loadSubCmd), so Update does no heavy work here — it just stores the result.
+		m.viewport.SetContent(msg.content)
 		m.viewport.GotoTop()
 	}
 	return m, nil
