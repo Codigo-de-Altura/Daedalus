@@ -17,7 +17,7 @@ index below.
 
 ### User guide
 - [Command line](guide/command-line.md) — running Daedalus, the interface, version, and help.
-- [Navigating the interface](guide/navigating-the-tui.md) — the six areas, moving in and out, the breadcrumb, no dead ends, and the loading/empty/error states.
+- [Navigating the interface](guide/navigating-the-tui.md) — the six areas, moving in and out, the breadcrumb, no dead ends, the loading/empty/error states, reading rendered Markdown documents, filtering lists with `/`, and the consistent visual language.
 - [Initializing a workspace](guide/initializing-a-workspace.md) — `daedalus init`, the `.daedalus/` workspace, and its root artifacts.
 - [Managing agents](guide/managing-agents.md) — the built-in agent catalog: `daedalus agent list` and `daedalus agent add`.
 - [Managing prompts](guide/managing-prompts.md) — reusable global and shared prompts, composition, and the interactive preview: `daedalus prompt list`, `create`, `edit`, `show`, `render`, and `remove`.

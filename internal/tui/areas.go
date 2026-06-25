@@ -112,8 +112,15 @@ type areaState struct {
 	err   error
 	items []areaItem
 
-	// cursor is the selected row within items.
+	// cursor is the selected row within the CURRENTLY VISIBLE rows (items filtered
+	// by filter). It indexes visibleItems(), not items, so filtering and selection
+	// stay consistent.
 	cursor int
+
+	// filter is the active in-memory list filter (a case-insensitive substring set
+	// via the filter form, R5). Empty means "show everything". It filters the
+	// already-loaded items; it never touches the core.
+	filter string
 
 	// --- sub-screen state (set when a row is opened into a detail view) ---
 	// sub captures the currently open sub-screen's lifecycle so the shared viewport
@@ -159,6 +166,25 @@ func newAreaStates() map[areaID]*areaState {
 	return states
 }
 
+// visibleItems returns the items matching the active filter (case-insensitive
+// substring on the row's label or badge). An empty filter returns every item. This
+// is the single place the filter is applied, so the list view, the cursor bounds
+// and "open" all agree on what is currently shown.
+func (st *areaState) visibleItems() []areaItem {
+	if strings.TrimSpace(st.filter) == "" {
+		return st.items
+	}
+	needle := strings.ToLower(st.filter)
+	var out []areaItem
+	for _, it := range st.items {
+		if strings.Contains(strings.ToLower(it.label), needle) ||
+			strings.Contains(strings.ToLower(it.badge), needle) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
 // handleAreaKey handles an area's list screen: cursor movement, opening the
 // selected row into a sub-screen, going back to the root, and retrying a failed
 // load. Back (esc) pops to the root and Home (h, handled in app.go) jumps there;
@@ -180,22 +206,37 @@ func (m Model) handleAreaKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, loadAreaCmd(m.workdir, m.active)
 	}
 
-	// While loading or in an error/empty state there is no list to move through, so
-	// only Back/Home/Retry (above) apply; ignore list keys.
-	if st.loading || st.err != nil || len(st.items) == 0 {
+	// While loading or in an error state there is no list to move through, so only
+	// Back/Home/Retry (above) apply; ignore list keys.
+	if st.loading || st.err != nil {
 		return m, nil
 	}
 
+	// "/" opens the filter form over the loaded list (R5). It is available whenever
+	// there are items to filter, including over an active filter (to refine it).
+	if key.Matches(msg, m.keys.Filter) && len(st.items) > 0 {
+		return m.openFilterForm()
+	}
+
+	// With no items at all (a genuinely empty area) there is nothing to move through.
+	if len(st.items) == 0 {
+		return m, nil
+	}
+
+	visible := st.visibleItems()
 	switch {
 	case key.Matches(msg, m.keys.Up):
 		if st.cursor > 0 {
 			st.cursor--
 		}
 	case key.Matches(msg, m.keys.Down):
-		if st.cursor < len(st.items)-1 {
+		if st.cursor < len(visible)-1 {
 			st.cursor++
 		}
 	case key.Matches(msg, m.keys.Enter):
+		if len(visible) == 0 {
+			return m, nil
+		}
 		return m.openSub()
 	}
 	return m, nil
@@ -207,7 +248,11 @@ func (m Model) handleAreaKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // detail (opens == false) are a no-op, so enter never leads to a blank sub-screen.
 func (m Model) openSub() (tea.Model, tea.Cmd) {
 	st := m.areas[m.active]
-	item := st.items[st.cursor]
+	visible := st.visibleItems()
+	if st.cursor >= len(visible) {
+		return m, nil
+	}
+	item := visible[st.cursor]
 	if !item.opens {
 		return m, nil
 	}
@@ -283,25 +328,60 @@ func (m Model) viewArea() string {
 
 	switch {
 	case st.loading:
-		return m.theme.subtle.Render("Loading " + strings.ToLower(def.title) + "…")
+		return m.theme.loading.Render("Loading " + strings.ToLower(def.title) + "…")
 	case st.err != nil:
-		return m.theme.errorBox.Render(
+		return m.errorPanel(
 			fmt.Sprintf("Could not load %s.\n\n%v\n\nPress r to retry, or esc to go back.",
 				strings.ToLower(def.title), st.err))
 	case len(st.items) == 0:
-		return m.theme.emptyState.Render(def.empty)
+		return m.emptyPanel(def.empty)
 	default:
 		return m.renderItems(st)
 	}
 }
 
+// errorPanel renders an error message inside the themed, alignment-corrected error
+// box (R8/Check-9). It is the single error-panel renderer so every error state —
+// area load, sub-screen load, form failure — shares one look and the border closes
+// evenly regardless of the message's uneven line widths (fixes the 07-01 errorBox
+// finding via theme.box).
+func (m Model) errorPanel(msg string) string {
+	return m.theme.box(m.theme.errorBox, m.theme.errorText.Render(msg))
+}
+
+// emptyPanel renders an empty-state message inside the themed empty box, so an
+// empty area reads as a deliberate, on-theme panel (R8/Check-8) rather than a stray
+// italic line. It uses the same width-normalizing box helper as errorPanel.
+func (m Model) emptyPanel(msg string) string {
+	return m.theme.box(m.theme.emptyBox, m.theme.emptyState.Render(msg))
+}
+
 // renderItems renders an area's list: each row as "<label>  <badge>", marking the
 // selected row with the theme's cursor. It is shared by every area so the lists
-// look and behave identically (R4/CA6). A footer hint distinguishes openable rows
-// from informational ones so the user knows what enter will do (Check-10).
+// look and behave identically (R4/CA6). It renders the FILTERED view, shows the
+// active filter, and degrades gracefully when a filter matches nothing — without
+// trapping the user (they can clear the filter or go back). A footer hint advertises
+// open/filter/back so the user knows what each key does (Check-10).
 func (m Model) renderItems(st *areaState) string {
 	var b strings.Builder
-	for i, it := range st.items {
+
+	// Show the active filter as a removable banner so the user is never confused by a
+	// short list that is actually filtered (and knows "/" refines it).
+	if strings.TrimSpace(st.filter) != "" {
+		b.WriteString(m.theme.subtle.Render(fmt.Sprintf("Filter: %q  ·  press / to change", st.filter)))
+		b.WriteString("\n\n")
+	}
+
+	visible := st.visibleItems()
+	if len(visible) == 0 {
+		// A filter that matches nothing is not a dead end: tell the user and how to
+		// recover.
+		b.WriteString(m.theme.emptyState.Render(
+			fmt.Sprintf("No matches for %q.\n\nPress / to change the filter, or esc to go back.", st.filter)))
+		return b.String()
+	}
+
+	for i, it := range visible {
 		row := it.label
 		if it.badge != "" {
 			row += "  " + m.theme.kindBadge.Render(it.badge)
@@ -311,13 +391,16 @@ func (m Model) renderItems(st *areaState) string {
 		} else {
 			b.WriteString(m.theme.listItem.Render(row))
 		}
-		if i < len(st.items)-1 {
+		if i < len(visible)-1 {
 			b.WriteString("\n")
 		}
 	}
-	if st.items[st.cursor].opens {
-		b.WriteString("\n\n")
-		b.WriteString(m.theme.subtle.Render("Press enter to open · esc to go back."))
+
+	b.WriteString("\n\n")
+	if st.cursor < len(visible) && visible[st.cursor].opens {
+		b.WriteString(m.theme.subtle.Render("Press enter to open · / filter · esc to go back."))
+	} else {
+		b.WriteString(m.theme.subtle.Render("Press / to filter · esc to go back."))
 	}
 	return b.String()
 }
@@ -330,16 +413,17 @@ func (m Model) viewSub() string {
 	st := m.areas[m.active]
 
 	var b strings.Builder
-	header := m.theme.subtle.Render(st.subTitle)
+	// The sub-screen title is a section heading (a level below the breadcrumb title),
+	// so it uses the heading token for a clear visual hierarchy.
+	header := m.theme.heading.Render(st.subTitle)
 	b.WriteString(header)
 	b.WriteString("\n\n")
 
 	switch st.sub {
 	case subLoading:
-		b.WriteString(m.theme.subtle.Render("Loading…"))
+		b.WriteString(m.theme.loading.Render("Loading…"))
 	case subErrored:
-		b.WriteString(m.theme.errorBox.Render(
-			st.subErr + "\n\nPress esc to go back."))
+		b.WriteString(m.errorPanel(st.subErr + "\n\nPress esc to go back."))
 	default:
 		b.WriteString(m.theme.previewFrame.Render(m.viewport.View()))
 		b.WriteString("\n")

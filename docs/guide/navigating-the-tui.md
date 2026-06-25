@@ -8,9 +8,9 @@ project's AI structure. This chapter explains how to move around: how to reach
 each area, how to step back, and how to read where you are. The keys are the
 same everywhere, so once you learn them in one area you know them in all of them.
 
-> This chapter covers the navigation shell only. The visual styling, Markdown
-> rendering, forms, the full keyboard-shortcut help system, and editing actions
-> arrive in later chapters as those features ship.
+> This chapter covers how you move around the interface, read documents in it,
+> and filter lists. The full keyboard-shortcut help system and in-interface
+> editing of artifacts arrive in later chapters as those features ship.
 
 ## Launching the interface
 
@@ -60,6 +60,7 @@ area and every detail screen.
 | `enter` / `l` | Enter the selected area, or open the selected item |
 | `esc` / `backspace` | Go back one level |
 | `h` | Jump straight to the root menu (home) |
+| `/` | Filter the current list (shown when an area has items) |
 | `r` | Retry loading an area that failed (shown only in the error state) |
 | `?` | Toggle the help line between short and expanded |
 | `q` / `Ctrl+C` | Quit Daedalus |
@@ -117,9 +118,9 @@ return to `Daedalus` in a single step.
 Some areas list items you can open into a **detail screen** — a read-only view of
 that item:
 
-- **Prompts** opens a prompt's composed text.
+- **Prompts** opens a prompt's composed text, formatted for reading.
 - **Workflows** opens a workflow's DAG.
-- **Backlog** opens a spec, architecture document, or epic.
+- **Backlog** opens a spec, architecture document, or epic, formatted for reading.
 
 Select the row and press `enter` (or `l`) to open it. Inside a detail screen the
 content scrolls: use `↑`/`↓` to scroll line by line, `pgup`/`pgdn` (or `b`/`f`)
@@ -129,6 +130,57 @@ the content you are. Press `esc` to return to the list.
 Some rows are purely informational (for example the **Init** and **Build**
 summaries) and do not open a detail screen; pressing `enter` on them does
 nothing.
+
+## Reading documents
+
+Most of what Daedalus manages is written as Markdown — prompts, specs,
+architecture documents, and epics. When you open one of these in a detail
+screen, Daedalus shows it **rendered**, not as raw Markdown source. You see:
+
+- **Headings** set apart from body text.
+- **Lists** laid out as bullets and numbers.
+- **Tables** drawn with proper rows and columns.
+- **Code blocks** in a monospaced block, with syntax highlighting.
+- **Emphasis** — bold and italic — shown as styled text.
+
+The document is wrapped to the width of the screen, so lines never run off the
+edge — make your terminal wider and the text reflows to use the space. Exact
+colors depend on your terminal's color support, but the layout stays readable
+everywhere.
+
+(Workflows are the exception: a workflow opens as a diagram of its DAG rather
+than as a Markdown document.)
+
+## Filtering a list
+
+When an area lists more rows than you want to scan, you can filter it down to the
+ones you care about. Press `/` from any area that has items to open the filter:
+
+1. Type a term to match. The filter is **case-insensitive** and matches anywhere
+   in a row's label or its badge (the small tag next to it), so you can filter by
+   name, kind, or status.
+2. Press `enter` to apply it. The list shrinks to the matching rows.
+3. Press `esc` at any time to cancel and leave the list unchanged.
+
+While a filter is active, a banner at the top of the list shows it — for example
+`Filter: "spec"  ·  press / to change` — so a short list is never mysterious. To
+**change** the filter, press `/` again (it opens pre-filled with your current
+term so you can refine it). To **clear** it, press `/`, empty the field, and
+press `enter` — an empty term shows everything again.
+
+If a term matches nothing, the list does not go blank or trap you: it tells you
+*"No matches"* and reminds you that `/` changes the filter and `esc` goes back.
+
+A blank filter (only spaces) is rejected with a clear message, since it could
+never match anything on purpose — clear the field instead to show all rows.
+
+## A consistent look
+
+Across every area and screen, Daedalus uses one visual language: the same accent
+color marks the selected row and headings, the same border frames detail panels
+and forms, the same badges tag items, and the loading, empty, and error states
+all share that styling. Once you recognize how one area looks, every other area
+reads the same way.
 
 ## Loading, empty, and error states
 

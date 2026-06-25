@@ -24,7 +24,6 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
 )
 
 // route identifies one screen in the navigation stack. The stack is the single
@@ -42,6 +41,10 @@ const (
 	// routeSub is a sub-screen reached from within an area (prompt preview,
 	// workflow DAG, build plan): a scrollable, read-only detail view.
 	routeSub
+	// routeForm is a form screen reached from within an area (e.g. the list filter):
+	// an embedded Huh form the user submits or cancels, returning to the area either
+	// way (no dead end).
+	routeForm
 )
 
 // Model is the Bubble Tea model for the Daedalus area shell. It holds the
@@ -90,6 +93,14 @@ type Model struct {
 	// areaState.
 	viewport      viewport.Model
 	viewportReady bool
+
+	// --- active form (routeForm) ---
+	// form is the embedded form component while the active route is routeForm; it is
+	// the reusable themed wrapper around a Huh form (see form.go). The submitted value
+	// is read back from the form itself (form.StringValue), not a model pointer, since
+	// the model is copied on every Update. Only one form is ever active at a time, so a
+	// single slot suffices.
+	form formComponent
 }
 
 // navKeyMap declares every navigation binding the shell understands. It is the
@@ -103,18 +114,19 @@ type Model struct {
 // small and uniform so it can be lifted into that registry without changing any
 // area's behavior.
 type navKeyMap struct {
-	Up    key.Binding
-	Down  key.Binding
-	Enter key.Binding
-	Back  key.Binding
-	Home  key.Binding
-	Retry key.Binding
-	Help  key.Binding
-	Quit  key.Binding
-	PgUp  key.Binding
-	PgDn  key.Binding
-	Top   key.Binding
-	Botom key.Binding
+	Up     key.Binding
+	Down   key.Binding
+	Enter  key.Binding
+	Back   key.Binding
+	Home   key.Binding
+	Retry  key.Binding
+	Filter key.Binding
+	Help   key.Binding
+	Quit   key.Binding
+	PgUp   key.Binding
+	PgDn   key.Binding
+	Top    key.Binding
+	Botom  key.Binding
 }
 
 func defaultNavKeyMap() navKeyMap {
@@ -152,6 +164,12 @@ func defaultNavKeyMap() navKeyMap {
 		Retry: key.NewBinding(
 			key.WithKeys("r"),
 			key.WithHelp("r", "retry"),
+		),
+		// "/" opens the list filter form over an area's items, the conventional
+		// search/filter key in TUIs so it is discoverable without instruction.
+		Filter: key.NewBinding(
+			key.WithKeys("/"),
+			key.WithHelp("/", "filter"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -212,6 +230,20 @@ func (m Model) Init() tea.Cmd {
 // messages to the active screen's handler. Side effects are returned as tea.Cmds,
 // never run inline.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// While a form is active it owns the keyboard: it must receive every message
+	// (keys AND its own cursor-blink ticks) so typing and validation work, and so the
+	// global help/quit keys do not steal characters the user is typing. The form's
+	// submit/cancel lifecycle is handled in updateForm, which is the only place that
+	// leaves routeForm — always back to the area, never into a dead end.
+	if m.current() == routeForm {
+		if sz, ok := msg.(tea.WindowSizeMsg); ok {
+			// Still track size so other screens are laid out correctly after the form.
+			m.width = sz.Width
+			m.height = sz.Height
+		}
+		return m.updateForm(msg)
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		return m.handleResize(msg)
@@ -274,7 +306,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// the natural action. Inside a scrollable sub-screen, q is reserved (esc is the
 		// documented way back) so the user does not accidentally exit while reading;
 		// ctrl+c still quits everywhere as the escape hatch.
-		if m.current() == routeSub && msg.String() == "q" {
+		//
+		// A form is NEVER reached here — Update routes routeForm to updateForm before
+		// handleKey runs, so a typed "q" reaches the text field instead of quitting.
+		// We still guard explicitly so a future reorder of Update cannot let the
+		// global "q" quit swallow a character the user is typing into a form input.
+		if msg.String() == "q" && (m.current() == routeSub || m.current() == routeForm) {
 			return m, nil
 		}
 		return m, tea.Quit
@@ -368,11 +405,49 @@ func (m Model) handleAreaLoaded(msg areaLoadedMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// openFilterForm pushes the list-filter form for the active area onto the stack
+// and initializes it, seeding the input with the area's current filter so opening
+// it again refines rather than resets. It returns the form's Init command so the
+// input focuses immediately. Filtering is purely in-memory (it shapes a string the
+// area matches against already-loaded items), so this needs no core seam.
+func (m Model) openFilterForm() (tea.Model, tea.Cmd) {
+	st := m.areas[m.active]
+	m.form = newFilterForm(m.theme, areaDefs[m.active].title, st.filter)
+	m.stack = append(m.stack, routeForm)
+	return m, m.form.Init()
+}
+
+// updateForm drives the active form and acts on its lifecycle. On submit it applies
+// the captured value (here: the list filter) and returns to the area; on cancel it
+// returns to the area unchanged. Either outcome pops routeForm, so a form is never
+// a dead end (R7/Check-6). While the form is pending it just keeps rendering.
+func (m Model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	form, result, cmd := m.form.Update(msg)
+	m.form = form
+
+	switch result {
+	case formSubmitted:
+		// Apply the filter and reset the cursor so the selection is valid against the
+		// newly filtered view. The value was validated by the form before submit and is
+		// read back from the form itself (not a stale model pointer).
+		st := m.areas[m.active]
+		st.filter = strings.TrimSpace(m.form.StringValue())
+		st.cursor = 0
+		return m.pop(), nil
+	case formCancelled:
+		return m.pop(), nil
+	default:
+		return m, cmd
+	}
+}
+
 // View implements tea.Model. It is a pure projection of the model: it renders the
 // active screen (root menu, an area, or a sub-screen) wrapped in the shared chrome
 // — a breadcrumb header and the contextual help footer — and never mutates state.
 func (m Model) View() string {
 	switch m.current() {
+	case routeForm:
+		return m.frame(m.form.View())
 	case routeSub:
 		return m.frame(m.viewSub())
 	case routeArea:
@@ -391,8 +466,13 @@ func (m Model) frame(body string) string {
 	b.WriteString(m.breadcrumb())
 	b.WriteString("\n\n")
 	b.WriteString(body)
-	b.WriteString("\n\n")
-	b.WriteString(m.help.View(m))
+	// A form draws its own submit/cancel help (and field help) inside its body, so
+	// the shell suppresses its key footer there to avoid two competing help lines.
+	// Every other screen gets the contextual footer.
+	if m.current() != routeForm {
+		b.WriteString("\n\n")
+		b.WriteString(m.help.View(m))
+	}
 	return b.String()
 }
 
@@ -405,10 +485,13 @@ func (m Model) breadcrumb() string {
 	if m.current() != routeRoot {
 		crumbs = append(crumbs, m.theme.breadcrumbActive.Render(areaDefs[m.active].title))
 	}
-	if m.current() == routeSub {
+	switch m.current() {
+	case routeSub:
 		if label := m.subBreadcrumb(); label != "" {
 			crumbs = append(crumbs, m.theme.subtle.Render(label))
 		}
+	case routeForm:
+		crumbs = append(crumbs, m.theme.subtle.Render("Filter"))
 	}
 	return strings.Join(crumbs, m.theme.breadcrumbSep.Render(" › "))
 }
@@ -433,30 +516,6 @@ func (m Model) viewRoot() string {
 		}
 	}
 	return b.String()
-}
-
-// renderMarkdown renders text as terminal Markdown via Glamour (R3), word-wrapped
-// to the sub-screen viewport width so headings, lists, emphasis and code blocks
-// read well and never overflow. On any render failure it falls back to the raw
-// text so a sub-screen always shows its content rather than breaking.
-func (m Model) renderMarkdown(text string) string {
-	width, _ := m.subViewportSize()
-	wrap := width - 2
-	if wrap < 20 {
-		wrap = 20
-	}
-	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
-		glamour.WithWordWrap(wrap),
-	)
-	if err != nil {
-		return text
-	}
-	out, err := r.Render(text)
-	if err != nil {
-		return text
-	}
-	return out
 }
 
 // subViewportSize computes the width/height available to the shared sub-screen
@@ -513,7 +572,7 @@ func (m Model) ShortHelp() []key.Binding {
 		if st != nil && st.err != nil {
 			return []key.Binding{m.keys.Retry, m.keys.Back, m.keys.Home, m.keys.Help, m.keys.Quit}
 		}
-		return []key.Binding{m.keys.Up, m.keys.Down, m.keys.Enter, m.keys.Back, m.keys.Home, m.keys.Help, m.keys.Quit}
+		return []key.Binding{m.keys.Up, m.keys.Down, m.keys.Enter, m.keys.Filter, m.keys.Back, m.keys.Home, m.keys.Help, m.keys.Quit}
 	}
 }
 
@@ -535,7 +594,7 @@ func (m Model) FullHelp() [][]key.Binding {
 		}
 	default:
 		return [][]key.Binding{
-			{m.keys.Up, m.keys.Down, m.keys.Enter},
+			{m.keys.Up, m.keys.Down, m.keys.Enter, m.keys.Filter},
 			{m.keys.Retry, m.keys.Back, m.keys.Home},
 			{m.keys.Help, m.keys.Quit},
 		}
