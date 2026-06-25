@@ -21,6 +21,11 @@ type theme struct {
 	title lipgloss.Style
 	// subtle styles secondary, lower-emphasis text (help hints, metadata).
 	subtle lipgloss.Style
+	// breadcrumbActive styles the active area's name in the navigation breadcrumb
+	// so the user can always see which of the six areas they are in (R5/CA5).
+	breadcrumbActive lipgloss.Style
+	// breadcrumbSep styles the separator drawn between breadcrumb segments.
+	breadcrumbSep lipgloss.Style
 	// listItem styles a non-selected row in the prompt list.
 	listItem lipgloss.Style
 	// listItemSelected styles the currently highlighted row in the prompt list.
@@ -86,6 +91,11 @@ func defaultTheme() theme {
 		accent: accent,
 		title:  lipgloss.NewStyle().Bold(true).Foreground(accent),
 		subtle: lipgloss.NewStyle().Foreground(muted),
+		breadcrumbActive: lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("252")),
+		breadcrumbSep: lipgloss.NewStyle().
+			Foreground(muted),
 		listItem: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("252")).
 			PaddingLeft(2),
