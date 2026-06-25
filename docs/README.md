@@ -24,6 +24,7 @@ index below.
 - [Managing specs](guide/managing-specs.md) — capture a brief, seed its spec at `.daedalus/specs/<slug>.md`, wire it to the *analyst* step of `sdd-default`, then generate and refine the spec yourself: `daedalus spec capture`, `list`, `show`, `edit`, and `remove`.
 - [Managing architecture documents](guide/managing-architecture.md) — create an architecture document at `.daedalus/architecture/<slug>.md`, optionally link it to its originating spec (the *architect* step of `sdd-default`), then generate and refine it yourself: `daedalus architecture create`, `list`, `show`, `edit`, and `remove`.
 - [Managing epics and tickets](guide/managing-epics-and-tickets.md) — build the SDD backlog under `.daedalus/epics/`: nested epics and tickets with status, priority, dependencies, and origin links to their spec/architecture (the *planner* step of `sdd-default`): `daedalus epic` and `daedalus ticket` (`create`, `list`, `show`, `edit`, `remove`).
+- [Tracing the backlog](guide/tracing-the-backlog.md) — verify the spec → epic → ticket chain is consistent (broken links, orphan tickets, missing-origin warnings) and navigate it in both directions: `daedalus trace verify` and `daedalus trace show`.
 - [Configuration](guide/configuration.md) — the workspace manifest, environment variables, and logging.
 
 ### Contributing

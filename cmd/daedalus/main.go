@@ -28,6 +28,7 @@ import (
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
 	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
 	"github.com/Codigo-de-Altura/Daedalus/internal/specs"
+	"github.com/Codigo-de-Altura/Daedalus/internal/traceability"
 	"github.com/Codigo-de-Altura/Daedalus/internal/tui"
 	"github.com/Codigo-de-Altura/Daedalus/internal/workflows"
 	"github.com/Codigo-de-Altura/Daedalus/internal/workspace"
@@ -59,6 +60,8 @@ func run(args []string) int {
 			return runEpic(args[1:], os.Stdout, os.Stderr)
 		case "ticket":
 			return runTicket(args[1:], os.Stdout, os.Stderr)
+		case "trace":
+			return runTrace(args[1:], os.Stdout, os.Stderr)
 		default:
 			fmt.Fprintf(os.Stderr, "daedalus: unknown command %q\nrun 'daedalus --help' for usage\n", args[0])
 			return 2
@@ -3942,6 +3945,238 @@ func writeBacklogSchemaErrors(w io.Writer, err error) {
 	for _, se := range ve.Errors {
 		fmt.Fprintf(w, "  - %s: observed %s; expected %s\n", se.Field, se.Observed, se.Expected)
 	}
+}
+
+// --- trace subcommand ---
+
+// runTrace handles the `daedalus trace` subcommand, a thin CLI surface over the
+// traceability aggregator (internal/traceability). It dispatches to verify (check the
+// whole chain) and show (navigate from one artifact). It is read-only and runs no agents
+// (R5/CA6). It keeps the same conventions as the sibling subcommands (own usage, logging
+// to stderr).
+func runTrace(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, traceUsage)
+		return 2
+	}
+	switch args[0] {
+	case "verify":
+		return runTraceVerify(args[1:], stdout, stderr)
+	case "show":
+		return runTraceShow(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown trace operation %q\n\n%s", args[0], traceUsage)
+		return 2
+	}
+}
+
+const traceUsage = "Usage: daedalus trace <operation> [flags]\n\n" +
+	"Consolidate and verify the SDD spec -> epic -> ticket traceability chain.\n" +
+	"Read-only: it reuses the links already recorded in specs/architecture/epics/tickets.\n\n" +
+	"Operations:\n" +
+	"  verify                    check the chain; report inconsistencies (exit 1 on hard errors)\n" +
+	"  show <artifact-id>        navigate the chain from a spec slug, epic id or ticket id\n\n" +
+	"Run 'daedalus trace <operation> --help' for an operation's flags.\n"
+
+// buildTraceGraph assembles the traceability graph over the three canonical workspace
+// roots under dir. Centralized so verify and show build the graph identically.
+func buildTraceGraph(dir string) (*traceability.Graph, error) {
+	return traceability.Build(specsRootFor(dir), architectureRootFor(dir), epicsRootFor(dir))
+}
+
+// runTraceVerify handles `daedalus trace verify`: it builds the chain and reports every
+// inconsistency in deterministic order, with a summary. Exit code mirrors workflow
+// validate: 0 when the chain has no hard errors (warnings/gaps do NOT fail), 1 when there
+// is at least one error-level inconsistency, 2 on a usage/IO error. Soft traceability
+// gaps (missing optional origin links) are reported but never affect the exit code,
+// honoring 05-03's optional-origin decision.
+func runTraceVerify(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus trace verify", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/ chain is verified")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus trace verify [--path .]\n\n"+
+			"Verify the spec -> epic -> ticket traceability chain. Reports broken links,\n"+
+			"orphan tickets and (as warnings) missing optional origin links. Exit 0 if there\n"+
+			"are no hard errors, 1 if there are, 2 on a usage error.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	graph, err := buildTraceGraph(*dir)
+	if err != nil {
+		logger.Error("trace verify failed", "phase", "build", "err", err)
+		fmt.Fprintf(stderr, "daedalus: trace verify failed: %v\n", err)
+		return 1
+	}
+
+	report := graph.Verify()
+	errs, warns := report.Counts()
+	logger.Info("trace verified", "errors", errs, "warnings", warns, "consistent", report.Consistent())
+
+	if report.Consistent() && warns == 0 {
+		fmt.Fprintln(stdout, "Traceability chain is consistent (no inconsistencies).")
+		return 0
+	}
+
+	if report.Consistent() {
+		fmt.Fprintf(stdout, "Traceability chain is consistent with %d warning%s (no hard errors):\n",
+			warns, plural(warns, "", "s"))
+	} else {
+		fmt.Fprintf(stdout, "Traceability chain has %d error%s and %d warning%s:\n",
+			errs, plural(errs, "", "s"), warns, plural(warns, "", "s"))
+	}
+	for _, f := range report.Findings {
+		fmt.Fprintf(stdout, "  - %s\n", f.Error())
+	}
+
+	// Only hard errors affect the exit code; warnings are informational.
+	if report.HasErrors() {
+		return 1
+	}
+	return 0
+}
+
+// runTraceShow handles `daedalus trace show <artifact-id>`: it navigates the chain from
+// the given artifact. The artifact kind is inferred from its id shape — a ticket id
+// (ticket-NN-MM-<slug>) climbs ascending; an epic id (epic-NN-<slug>) shows its origin
+// and its tickets; anything else is treated as a spec slug and descends. This single
+// entry point keeps the CLI small while covering both directions (R1/CA1/CA2).
+func runTraceShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus trace show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/ chain is navigated")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus trace show <artifact-id> [--path .]\n\n"+
+			"Navigate the traceability chain from an artifact. A spec slug descends to its\n"+
+			"epics and tickets; a ticket id (ticket-NN-MM-<slug>) ascends to its epic and\n"+
+			"origin spec/architecture; an epic id (epic-NN-<slug>) shows both.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitSinglePositional(args, "artifact id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	graph, err := buildTraceGraph(*dir)
+	if err != nil {
+		logger.Error("trace show failed", "phase", "build", "err", err)
+		fmt.Fprintf(stderr, "daedalus: trace show failed: %v\n", err)
+		return 1
+	}
+
+	switch {
+	case backlog.IsTicketID(id):
+		return traceShowTicket(stdout, stderr, graph, id)
+	case backlog.IsEpicID(id):
+		return traceShowEpic(stdout, stderr, graph, id)
+	default:
+		return traceShowSpec(stdout, stderr, graph, id)
+	}
+}
+
+// traceShowSpec renders the descending chain from a spec slug (R1/CA1).
+func traceShowSpec(stdout, stderr io.Writer, graph *traceability.Graph, slug string) int {
+	chain, ok := graph.DescendFromSpec(slug)
+	if !ok {
+		fmt.Fprintf(stderr, "daedalus: no spec %q in the traceability chain "+
+			"(a spec must be materialized; check 'daedalus spec list')\n", slug)
+		return 2
+	}
+	fmt.Fprintf(stdout, "spec %s — %s\n", chain.Spec.Slug, chain.Spec.Title)
+	if len(chain.Epics) == 0 {
+		fmt.Fprintln(stdout, "  (no epics link to this spec)")
+		return 0
+	}
+	for _, ewt := range chain.Epics {
+		fmt.Fprintf(stdout, "  └─ epic %s — %s\n", ewt.Epic.ID, ewt.Epic.Title)
+		if len(ewt.Tickets) == 0 {
+			fmt.Fprintln(stdout, "       (no tickets)")
+			continue
+		}
+		for _, tk := range ewt.Tickets {
+			fmt.Fprintf(stdout, "       └─ ticket %s — %s\n", tk.ID, tk.Title)
+		}
+	}
+	return 0
+}
+
+// traceShowEpic renders an epic's origin links (ascending half) and its tickets
+// (descending half), covering both directions from an epic (R1/CA1/CA2).
+func traceShowEpic(stdout, stderr io.Writer, graph *traceability.Graph, epicID string) int {
+	epic, ok := graph.Epics[epicID]
+	if !ok {
+		fmt.Fprintf(stderr, "daedalus: no epic %q in the traceability chain "+
+			"(check 'daedalus epic list')\n", epicID)
+		return 2
+	}
+	fmt.Fprintf(stdout, "epic %s — %s\n", epic.ID, epic.Title)
+	fmt.Fprintf(stdout, "  origin spec:         %s\n", traceRefOrNone(epic.SpecRef))
+	fmt.Fprintf(stdout, "  origin architecture: %s\n", traceRefOrNone(epic.ArchRef))
+
+	tickets := graph.TicketsOfEpic(epicID)
+	if len(tickets) == 0 {
+		fmt.Fprintln(stdout, "  tickets: (none)")
+	} else {
+		fmt.Fprintln(stdout, "  tickets:")
+		for _, tk := range tickets {
+			fmt.Fprintf(stdout, "    └─ ticket %s — %s\n", tk.ID, tk.Title)
+		}
+	}
+	return 0
+}
+
+// traceShowTicket renders the ascending chain from a ticket (R1/CA2): its epic and origin
+// spec/architecture, flagging a missing epic (orphan) explicitly.
+func traceShowTicket(stdout, stderr io.Writer, graph *traceability.Graph, ticketID string) int {
+	chain, ok := graph.AscendFromTicket(ticketID)
+	if !ok {
+		fmt.Fprintf(stderr, "daedalus: no ticket %q in the traceability chain "+
+			"(check 'daedalus ticket list <epic-id>')\n", ticketID)
+		return 2
+	}
+	fmt.Fprintf(stdout, "ticket %s — %s\n", chain.Ticket.ID, chain.Ticket.Title)
+	if chain.EpicFound {
+		fmt.Fprintf(stdout, "  └─ epic %s — %s\n", chain.Epic.ID, chain.Epic.Title)
+	} else {
+		fmt.Fprintf(stdout, "  └─ epic %s — MISSING (orphan ticket)\n", chain.Ticket.EpicID)
+	}
+	if chain.OriginSpecFound {
+		fmt.Fprintf(stdout, "       └─ origin spec %s — %s\n", chain.OriginSpec.Slug, chain.OriginSpec.Title)
+	} else {
+		fmt.Fprintln(stdout, "       └─ origin spec: (none resolved)")
+	}
+	if chain.OriginArchFound {
+		fmt.Fprintf(stdout, "       └─ origin architecture %s — %s\n", chain.OriginArch.Slug, chain.OriginArch.Title)
+	} else {
+		fmt.Fprintln(stdout, "       └─ origin architecture: (none resolved)")
+	}
+	return 0
+}
+
+// traceRefOrNone renders an origin reference or a placeholder when it is empty.
+func traceRefOrNone(ref string) string {
+	if ref == "" {
+		return "(none)"
+	}
+	return ref
 }
 
 // writePreview renders, on stdout, the directories and root artifacts a plan
