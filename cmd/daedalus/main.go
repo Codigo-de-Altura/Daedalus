@@ -20,6 +20,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Codigo-de-Altura/Daedalus/internal/architecture"
 	"github.com/Codigo-de-Altura/Daedalus/internal/buildinfo"
 	"github.com/Codigo-de-Altura/Daedalus/internal/catalog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
@@ -50,6 +51,8 @@ func run(args []string) int {
 			return runWorkflow(args[1:], os.Stdout, os.Stderr)
 		case "spec":
 			return runSpec(args[1:], os.Stdout, os.Stderr)
+		case "architecture":
+			return runArchitecture(args[1:], os.Stdout, os.Stderr)
 		default:
 			fmt.Fprintf(os.Stderr, "daedalus: unknown command %q\nrun 'daedalus --help' for usage\n", args[0])
 			return 2
@@ -2474,6 +2477,518 @@ func writeSpecSchemaErrors(w io.Writer, err error) {
 	}
 }
 
+// runArchitecture handles the `daedalus architecture` subcommand, a thin CLI surface
+// over the SDD backlog's architecture-document domain (internal/architecture). It
+// dispatches to the operation named by the next argument so the verb set can grow
+// without reshaping run(): create, list, show, edit, remove. It keeps the same
+// conventions as runSpec/runWorkflow — own usage, exit code 2 for usage errors,
+// logging to stderr — so the CLI feels uniform.
+//
+// Phase 1: none of these operations run the architect agent (R5/CA5). `create` only
+// manages the definition — it persists a document and, when linked, wires it (in
+// frontmatter) to the architect step of the default SDD workflow; the user generates
+// the document body by running the agent on their backend.
+func runArchitecture(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, architectureUsage)
+		return 2
+	}
+
+	switch args[0] {
+	case "create":
+		return runArchitectureCreate(args[1:], stdout, stderr)
+	case "list":
+		return runArchitectureList(args[1:], stdout, stderr)
+	case "show":
+		return runArchitectureShow(args[1:], stdout, stderr)
+	case "edit":
+		return runArchitectureEdit(args[1:], stdout, stderr)
+	case "remove":
+		return runArchitectureRemove(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown architecture operation %q\n\n%s", args[0], architectureUsage)
+		return 2
+	}
+}
+
+// architectureUsage is the shared help text for the `architecture` subcommand,
+// surfaced when no operation (or an unknown one) is given.
+const architectureUsage = "Usage: daedalus architecture <operation> [flags]\n\n" +
+	"Work with the SDD backlog's architecture documents in .daedalus/architecture/.\n" +
+	"Daedalus manages the definition only; it does not run the architect agent.\n\n" +
+	"Operations:\n" +
+	"  create <slug> --title <t> [--spec <s>] [flags]   create an architecture document\n" +
+	"  list                                             list documents (slug, spec, title)\n" +
+	"  show <slug>                                      print a document verbatim (raw)\n" +
+	"  edit <slug> [flags]                              edit a document's title, spec or body\n" +
+	"  remove <slug>                                    delete a document's file\n\n" +
+	"Run 'daedalus architecture <operation> --help' for an operation's flags.\n"
+
+// architectureRootFor builds the canonical `.daedalus/architecture/` directory under
+// dir so a document lands exactly where init scaffolds the architecture/ directory.
+// Built here rather than in the architecture package so that package stays free of the
+// workspace-location convention (mirrors promptsRootFor/specsRootFor).
+func architectureRootFor(dir string) string {
+	return filepath.Join(dir, workspace.Name, architecture.ArchitectureDir)
+}
+
+// specExistsFor reports whether the referenced spec slug has a materialized
+// `<slug>.md` spec under the workspace's specs directory. It is the friendly,
+// filesystem-aware existence check the architecture store deliberately does NOT do
+// (the store stays a pure model->bytes transform and must not couple to internal/
+// specs): the CLI knows where specs live, so it resolves the link here. This mirrors
+// how runWorkflowValidate resolves agent existence at the CLI layer rather than in the
+// core. A missing spec is rejected at create time as an actionable usage error,
+// coherent with the validation's precondition that a spec exists to link; full
+// spec->architecture->... traceability is ticket 05-04.
+func specExistsFor(dir, specSlug string) bool {
+	path := filepath.Join(dir, workspace.Name, specs.SpecsDir, specSlug+specs.FileExt)
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// runArchitectureCreate handles `daedalus architecture create <slug> --title <t>
+// [--spec <spec-slug>]`: it creates an architecture document under
+// .daedalus/architecture/. The document is validated before any write, so an invalid
+// slug/title is rejected with an actionable error and nothing is written. The --spec
+// link is OPTIONAL (R3); when given, the referenced spec must already exist (a
+// friendly check) and is recorded as the spec -> architecture trace. It is
+// non-destructive — an existing document (e.g. one the user refined) is preserved, not
+// overwritten (R4/R7) — and --preview reports the file that would be created without
+// writing anything.
+func runArchitectureCreate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus architecture create", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/architecture/ the document is added to")
+	title := fs.String("title", "", "document title (required)")
+	specSlug := fs.String("spec", "", "slug of the originating spec to link (optional; must exist in .daedalus/specs/)")
+	body := fs.String("body", "", "document body inline")
+	bodyFile := fs.String("body-file", "", "document body from a file (takes precedence over --body)")
+	preview := fs.Bool("preview", false, "show the file that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus architecture create <slug> --title <t> [--spec <spec-slug>] [flags]\n\n"+
+			"Create an architecture document as <slug>.md in the target workspace's\n"+
+			".daedalus/architecture/ directory. With --spec, link it to an existing spec as\n"+
+			"its origin (the spec -> architecture trace), wired to the architect step of the\n"+
+			"sdd-default workflow; Daedalus does NOT run the agent. Existing documents are not\n"+
+			"overwritten. If both --body-file and --body are given, --body-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitArchitectureSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	// Resolve the body: --body-file wins over --body so a caller can keep a long
+	// document in a file without it being shadowed by an accidental inline one.
+	bodyText := *body
+	if *bodyFile != "" {
+		b, err := os.ReadFile(*bodyFile)
+		if err != nil {
+			logger.Error("architecture create rejected", "phase", "flags", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return 2
+		}
+		bodyText = string(b)
+	}
+
+	// Friendly spec-link resolution: a non-empty --spec must reference an existing
+	// spec. We translate the spec slug to its file reference (<spec-slug>.md), which is
+	// exactly what the frontmatter records as the trace.
+	var specRef string
+	if strings.TrimSpace(*specSlug) != "" {
+		if !specs.IsKebabCase(*specSlug) {
+			fmt.Fprintf(stderr, "daedalus: --spec %q is not valid kebab-case\n", *specSlug)
+			return 2
+		}
+		if !specExistsFor(*dir, *specSlug) {
+			logger.Error("architecture create rejected", "phase", "spec-link", "spec", *specSlug)
+			fmt.Fprintf(stderr, "daedalus: spec %q not found in %s; capture it first or omit --spec\n",
+				*specSlug, filepath.ToSlash(filepath.Join(workspace.Name, specs.SpecsDir)))
+			return 2
+		}
+		specRef = *specSlug + specs.FileExt
+	}
+
+	doc := architecture.Document{Slug: slug, Title: *title, SpecRef: specRef, Body: bodyText}
+	archRoot := architectureRootFor(*dir)
+
+	// Plan first: validates the document and renders the content without touching the
+	// filesystem, so an invalid document fails as a usage error before any write or
+	// preview.
+	plan, err := architecture.PlanCreate(archRoot, doc)
+	if err != nil {
+		logger.Error("architecture create rejected", "phase", "plan", "slug", slug, "err", err)
+		if isArchitectureInvalid(err) {
+			fmt.Fprintf(stderr, "daedalus: architecture document %q is invalid; it was not created:\n", slug)
+			writeArchitectureSchemaErrors(stderr, err)
+		} else {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		}
+		return 2
+	}
+
+	logger.Info("architecture create planned", "slug", plan.Document.Slug, "spec", plan.Document.SpecRef, "path", plan.Path)
+
+	if *preview {
+		fmt.Fprintf(stdout, "Preview of creating architecture document %q at %s:\n",
+			plan.Document.Slug, filepath.ToSlash(plan.Path))
+		fmt.Fprint(stdout, plan.Content)
+		logger.Info("architecture create preview only", "slug", plan.Document.Slug, "applied", false)
+		return 0
+	}
+
+	if err := plan.Apply(); err != nil {
+		if errors.Is(err, architecture.ErrDocumentExists) {
+			logger.Error("architecture create rejected", "phase", "apply", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v — not overwritten\n", err)
+			return 2
+		}
+		logger.Error("architecture create failed", "phase", "apply", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: architecture create failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("architecture document created", "slug", plan.Document.Slug, "spec", plan.Document.SpecRef)
+	fmt.Fprintf(stdout, "Created architecture document %q at %s.\n",
+		plan.Document.Slug, filepath.ToSlash(plan.Path))
+	if plan.Document.SpecRef != "" {
+		fmt.Fprintf(stdout, "Linked to spec %s. Generate the architecture by running the %q agent on your backend, then refine it.\n",
+			plan.Document.SpecRef, architecture.ArchitectAgent)
+	} else {
+		fmt.Fprintf(stdout, "Generate the architecture by running the %q agent on your backend, then refine it.\n",
+			architecture.ArchitectAgent)
+	}
+	return 0
+}
+
+// runArchitectureList handles `daedalus architecture list`: it prints the architecture
+// documents (slug, spec link, title) in deterministic, slug-sorted order.
+func runArchitectureList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus architecture list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/architecture/ is listed")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus architecture list [--path .]\n\n"+
+			"List the architecture documents (slug, linked spec or '-', title).\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	entries, err := architecture.List(architectureRootFor(*dir))
+	if err != nil {
+		logger.Error("architecture list failed", "phase", "list", "err", err)
+		fmt.Fprintf(stderr, "daedalus: architecture list failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("architecture documents listed", "documents", len(entries))
+	fmt.Fprintf(stdout, "Architecture documents (%d):\n", len(entries))
+	for _, e := range entries {
+		specRef := e.SpecRef
+		if specRef == "" {
+			specRef = "-"
+		}
+		fmt.Fprintf(stdout, "  %s\t%s\t%s\n", e.Slug, specRef, e.Title)
+	}
+	return 0
+}
+
+// runArchitectureShow handles `daedalus architecture show <slug>`: it prints the
+// document's file content verbatim to stdout, so the user sees exactly what is
+// persisted.
+func runArchitectureShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus architecture show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/architecture/ holds the document")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus architecture show <slug> [--path .]\n\n"+
+			"Print the architecture document's file content verbatim.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitArchitectureSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !architecture.IsKebabCase(slug) {
+		fmt.Fprintf(stderr, "daedalus: architecture slug %q is not valid kebab-case\n", slug)
+		return 2
+	}
+
+	path := filepath.Join(architectureRootFor(*dir), slug+architecture.FileExt)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Error("architecture show rejected", "phase", "read", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: architecture document %q not found\n", slug)
+			return 2
+		}
+		logger.Error("architecture show failed", "phase", "read", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: architecture show failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("architecture document shown", "slug", slug)
+	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// runArchitectureEdit handles `daedalus architecture edit <slug>`: it edits a
+// document's title, spec link and/or body in place. The edit is validated before any
+// write, so an edit that would leave the document invalid (e.g. an empty title) is
+// rejected with an actionable error and the existing file is left intact (R4). A
+// non-empty --spec must reference an existing spec (friendly check); --spec "" clears
+// the link. Writes are atomic.
+func runArchitectureEdit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus architecture edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/architecture/ holds the document")
+	title := fs.String("title", "", "set the document's title")
+	specSlug := fs.String("spec", "", "set the originating spec link by slug (empty clears the link)")
+	body := fs.String("body", "", "set the document's body inline")
+	bodyFile := fs.String("body-file", "", "set the document's body from a file (takes precedence over --body)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus architecture edit <slug> [flags]\n\n"+
+			"Edit an architecture document's title, spec link or body. At least one edit flag\n"+
+			"is required. A non-empty --spec must reference an existing spec; --spec \"\" clears\n"+
+			"the link. The edit is validated before writing; an invalid edit is rejected and\n"+
+			"the existing file is left intact. If both --body-file and --body are given,\n"+
+			"--body-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitArchitectureSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	spec, err := buildArchitectureEditSpec(fs, *dir, *title, *specSlug, *body, *bodyFile, stderr)
+	if err != nil {
+		// buildArchitectureEditSpec already reported the specific reason to stderr.
+		logger.Error("architecture edit rejected", "phase", "flags", "slug", slug, "err", err)
+		return 2
+	}
+	if spec.IsEmpty() {
+		fmt.Fprint(stderr, "daedalus: architecture edit requires at least one edit flag "+
+			"(--title, --spec, --body, --body-file)\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	archRoot := architectureRootFor(*dir)
+
+	edited, err := architecture.Edit(archRoot, slug, spec)
+	if err != nil {
+		switch {
+		case errors.Is(err, architecture.ErrDocumentNotFound):
+			logger.Error("architecture edit rejected", "phase", "load", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			fmt.Fprint(stderr, "the document must already exist; create it first\n")
+			return 2
+		case errors.Is(err, architecture.ErrMalformed):
+			logger.Error("architecture edit failed", "phase", "load", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 1
+		case isArchitectureInvalid(err):
+			logger.Error("architecture edit rejected", "phase", "validate", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: architecture document %q is invalid; the edit was not applied:\n", slug)
+			writeArchitectureSchemaErrors(stderr, err)
+			return 2
+		default:
+			logger.Error("architecture edit failed", "phase", "write", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: architecture edit failed: %v\n", err)
+			return 1
+		}
+	}
+
+	logger.Info("architecture document edited", "slug", edited.Slug, "spec", edited.SpecRef)
+	fmt.Fprintf(stdout, "Edited architecture document %q at %s.\n",
+		edited.Slug, filepath.ToSlash(filepath.Join(archRoot, edited.Slug+architecture.FileExt)))
+	return 0
+}
+
+// buildArchitectureEditSpec assembles an architecture.EditSpec from the parsed edit
+// flags. It uses fs.Visit to learn which flags the user actually passed, so an
+// explicit empty value (e.g. --title "" or --spec "") is recorded as a deliberate
+// change rather than confused with the flag's default. --body-file takes precedence
+// over --body. A non-empty --spec is resolved to its file reference and verified to
+// exist (friendly check); on any flag-level error it reports to stderr and returns an
+// error so the caller exits 2.
+func buildArchitectureEditSpec(fs *flag.FlagSet, dir, title, specSlug, body, bodyFile string, stderr io.Writer) (architecture.EditSpec, error) {
+	var spec architecture.EditSpec
+
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	if set["title"] {
+		spec.SetTitle = true
+		spec.Title = title
+	}
+	if set["spec"] {
+		spec.SetSpec = true
+		// An empty --spec clears the link; a non-empty one must reference an existing
+		// spec and is stored as its file reference (<slug>.md).
+		if strings.TrimSpace(specSlug) == "" {
+			spec.Spec = ""
+		} else {
+			if !specs.IsKebabCase(specSlug) {
+				fmt.Fprintf(stderr, "daedalus: --spec %q is not valid kebab-case\n", specSlug)
+				return architecture.EditSpec{}, fmt.Errorf("invalid spec slug")
+			}
+			if !specExistsFor(dir, specSlug) {
+				fmt.Fprintf(stderr, "daedalus: spec %q not found in %s; capture it first or pass --spec \"\" to clear the link\n",
+					specSlug, filepath.ToSlash(filepath.Join(workspace.Name, specs.SpecsDir)))
+				return architecture.EditSpec{}, fmt.Errorf("spec not found")
+			}
+			spec.Spec = specSlug + specs.FileExt
+		}
+	}
+	switch {
+	case set["body-file"]:
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return architecture.EditSpec{}, err
+		}
+		spec.SetBody = true
+		spec.Body = string(b)
+	case set["body"]:
+		spec.SetBody = true
+		spec.Body = body
+	}
+
+	return spec, nil
+}
+
+// runArchitectureRemove handles `daedalus architecture remove <slug>`: it deletes the
+// document's file and nothing else. An absent document is reported as an explicit
+// error.
+func runArchitectureRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus architecture remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/architecture/ holds the document")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus architecture remove <slug> [--path .]\n\n"+
+			"Delete an architecture document's file from the workspace. Only that file is\n"+
+			"removed.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitArchitectureSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	archRoot := architectureRootFor(*dir)
+
+	if err := architecture.Remove(archRoot, slug); err != nil {
+		if errors.Is(err, architecture.ErrDocumentNotFound) || !architecture.IsKebabCase(slug) {
+			logger.Error("architecture remove rejected", "phase", "remove", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		}
+		logger.Error("architecture remove failed", "phase", "remove", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: architecture remove failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("architecture document removed", "slug", slug)
+	fmt.Fprintf(stdout, "Removed architecture document %q from %s.\n",
+		slug, filepath.ToSlash(filepath.Join(archRoot, slug+architecture.FileExt)))
+	return 0
+}
+
+// splitArchitectureSlug extracts the single positional architecture slug from an
+// argument list, returning it plus the remaining (flag) tokens. It mirrors
+// splitSpecSlug but names an "architecture slug" in its errors so the subcommand's
+// usage messages read correctly. Exactly one positional is required; a `--help`/`-h`
+// token is allowed without a slug so the caller's parser can show usage.
+func splitArchitectureSlug(args []string) (slug string, flags []string, err error) {
+	positionals, flags := splitPositionals(args)
+	for _, f := range flags {
+		if f == "-h" || f == "--help" {
+			return "", flags, nil
+		}
+	}
+	switch len(positionals) {
+	case 1:
+		return positionals[0], flags, nil
+	case 0:
+		return "", flags, errors.New("this operation requires exactly one architecture slug")
+	default:
+		return "", flags, fmt.Errorf("this operation requires exactly one architecture slug, got %d", len(positionals))
+	}
+}
+
+// isArchitectureInvalid reports whether err is (or wraps) a
+// *architecture.ValidationError — the rich error the architecture flows return from
+// their pre-write gates — so the CLI detects it structurally with errors.As rather
+// than matching a message prefix.
+func isArchitectureInvalid(err error) bool {
+	var ve *architecture.ValidationError
+	return errors.As(err, &ve)
+}
+
+// writeArchitectureSchemaErrors renders an architecture validation failure as
+// actionable lines, one finding per line (field: observed / expected), so the user can
+// fix every problem in one pass. It falls back to the plain error text if err is not a
+// *architecture.ValidationError, so it is safe to call on any error.
+func writeArchitectureSchemaErrors(w io.Writer, err error) {
+	var ve *architecture.ValidationError
+	if !errors.As(err, &ve) {
+		fmt.Fprintf(w, "  - %v\n", err)
+		return
+	}
+	for _, se := range ve.Errors {
+		fmt.Fprintf(w, "  - %s: observed %s; expected %s\n", se.Field, se.Observed, se.Expected)
+	}
+}
+
 // writePreview renders, on stdout, the directories and root artifacts a plan
 // would create. It lists nothing for an already-complete workspace so an
 // idempotent re-run produces an explicit "nothing to update" preview.
@@ -2566,6 +3081,11 @@ var valueFlags = map[string]struct{}{
 	"-outputs": {}, "--outputs": {},
 	"-gate": {}, "--gate": {},
 	"-depends-on": {}, "--depends-on": {},
+	// architecture-subcommand value flag (the optional spec link). Listed here too
+	// because the architecture subcommand shares splitPositionals; over-listing is
+	// harmless since a flag a given operation does not define simply never appears in
+	// its args.
+	"-spec": {}, "--spec": {},
 }
 
 // splitPositionals separates the positional tokens from the flag tokens in an
