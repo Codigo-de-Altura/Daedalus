@@ -59,12 +59,46 @@
 
 ## Verdict
 
-**Estado:** _APPROVED_ / _REJECTED_ — _(a completar por Yoda tras ejecutar los checks.)_
+**Estado:** **APPROVED** — validated by Yoda on 2026-06-24 against the test binary
+`go build -o $TEMP/daedalus-06.exe ./cmd/daedalus` (go 1.26.4 windows/amd64).
+
+Scope note: per the orchestrator's scope boundary, the canonical→Claude Code mapping
+is RF-6.2 (ticket-06-02). The Claude Code adapter in 06-01 is an intentional stub
+returning `ErrNotImplemented`. Therefore the "real artifacts produced in `.claude/`
+and exit 0" portion of Check 3 and Check 7 is **DEFERRED to 06-02**, not a 06-01
+finding. Everything that is in-scope for 06-01 passes for real.
+
+### Evidence (real commands + exit codes)
+
+Health:
+- `go build ./...` → exit 0
+- `go test ./... -count=1` → all packages ok (incl. `internal/compile`, `internal/workspace`)
+- `go vet ./...` → exit 0
+- `gofmt -l internal cmd` → empty output (exit 0)
+
+Behavioral:
+- Check 1 — `daedalus build --help` → help with alias note, exit **0**.
+- Check 2 — `daedalus sync --help` → byte-identical help (alias), exit **0**.
+- Check 3/7 (in-scope) — valid workspace: workspace located, backend `claude-code`
+  resolved from `daedalus.yaml`, definition validated, routed to Claude adapter via
+  the registry; terminated with `compiling backend "claude-code": backend adapter
+  not yet implemented`, exit **4**, no `.claude/` written. Real-artifact/exit-0 part
+  DEFERRED to 06-02.
+- Check 4 — no `.daedalus/`: `no .daedalus workspace found ... run 'daedalus init'`,
+  exit **4**, no `.claude/` written.
+- Check 5 — agent missing required `role`: `canonical definition is invalid
+  (1 problem) ... missing required key: role`, exit **3** (validation), no `.claude/`.
+- Check 6 — manifest backend `codex` (no adapter): definition validated first, then
+  `no adapter registered for backend: "codex" (registered: claude-code)`, exit **4**,
+  no `.claude/`.
+- Check 8 — exit-code matrix all distinct: success 0, usage 2, validation 3,
+  compile/write 4. Validation (3) and compile/write (4) are effectively distinct.
 
 ### Hallazgos
 
 | # | Severidad | Check | Observado | Esperado |
 |---|---|---|---|---|
-| | | | | |
+| 1 | info (deferred) | 3, 7 | Stub Claude adapter returns `ErrNotImplemented`; no `.claude/` artifacts, exit 4. | Real `.claude/` artifacts + exit 0 — DEFERRED to RF-6.2 / ticket-06-02; out of scope for 06-01. |
+| 2 | minor (info) | 6 (preview) | `build --preview` on a valid repo also exits 4: the stub `Compile` runs before the preview no-write gate. Preview still wrote nothing. | Expected at this stage — compile-all-before-write precedes the write/preview gate; once 06-02 lands, preview will reach exit 0. Not a 06-01 defect. |
 
 > Severidad: `blocker` / `major` / `minor`. Un hallazgo por fila. Si `REJECTED`, el orquestador traslada estos hallazgos a `observations.md`.

@@ -25,6 +25,7 @@ import (
 	"github.com/Codigo-de-Altura/Daedalus/internal/backlog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/buildinfo"
 	"github.com/Codigo-de-Altura/Daedalus/internal/catalog"
+	"github.com/Codigo-de-Altura/Daedalus/internal/compile"
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
 	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
 	"github.com/Codigo-de-Altura/Daedalus/internal/specs"
@@ -62,6 +63,10 @@ func run(args []string) int {
 			return runTicket(args[1:], os.Stdout, os.Stderr)
 		case "trace":
 			return runTrace(args[1:], os.Stdout, os.Stderr)
+		case "build", "sync":
+			// `sync` is a documented alias of `build` (REQ-1): both compile the
+			// canonical .daedalus/ definition to the configured backend's native format.
+			return runBuild(args[1:], os.Stdout, os.Stderr)
 		default:
 			fmt.Fprintf(os.Stderr, "daedalus: unknown command %q\nrun 'daedalus --help' for usage\n", args[0])
 			return 2
@@ -259,6 +264,125 @@ func writeSeedPreview(stdout io.Writer, dir string) {
 	fmt.Fprintf(stdout, "  + %s (factory workflow)\n",
 		filepath.ToSlash(filepath.Join(workspace.Name, workflows.WorkflowsDir,
 			workflows.DefaultWorkflowName+workflows.FileExt)))
+}
+
+// Build exit codes. They are differentiated so a caller (a script, a CI gate, a
+// validator) can tell the failure modes apart from the process status alone
+// (REQ-8): a definition that fails validation is a different problem — fixed by
+// editing the canonical sources — than a backend that cannot be compiled or
+// written. Usage errors keep the project-wide exit code 2; the two build-specific
+// failure classes get their own codes above it so they never collide with it.
+const (
+	exitBuildOK         = 0 // success (REQ-8)
+	exitBuildUsage      = 2 // flag/usage error, matching the rest of the CLI
+	exitBuildValidation = 3 // canonical definition failed validation (REQ-3/REQ-8)
+	exitBuildCompile    = 4 // workspace missing, no adapter, compile or write failure (REQ-8)
+)
+
+// runBuild handles `daedalus build` (and its alias `sync`): it compiles the
+// canonical .daedalus/ definition to the configured backend(s)' native format
+// (RF-6.1). It is the thin CLI surface over internal/compile: it parses flags,
+// delegates the whole pipeline to compile.Build (which locates the workspace,
+// validates the definition before writing, routes each backend through the
+// adapter registry and writes the artifacts), renders the summary, and maps the
+// typed errors to differentiated exit codes. --preview computes the plan without
+// writing anything; the deep diff/preview rendering is ticket-06-04's job.
+func runBuild(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus build", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/ workspace is compiled")
+	preview := fs.Bool("preview", false, "show what would be compiled without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus build [flags]   (alias: daedalus sync)\n\n"+
+			"Compile the canonical .daedalus/ definition to the native format of the\n"+
+			"backend(s) configured in daedalus.yaml. The definition is validated before\n"+
+			"anything is written; an invalid definition aborts the build with nothing\n"+
+			"changed. --preview reports the plan without writing.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitBuildOK
+		}
+		return exitBuildUsage
+	}
+
+	logger := logging.New(stderr)
+
+	out, err := compile.Build(compile.Options{
+		Root:    *dir,
+		Preview: *preview,
+		Logger:  logger,
+	})
+	if err != nil {
+		return writeBuildError(stderr, err)
+	}
+
+	writeBuildSummary(stdout, out)
+	return exitBuildOK
+}
+
+// writeBuildError renders a build failure on stderr and returns the matching
+// exit code, distinguishing the failure classes REQ-8 requires. A validation
+// error is rendered finding-by-finding (the canonical sources to fix); the
+// workspace-missing, no-adapter, compile and write failures are rendered as a
+// single actionable line and share the compile/write exit code.
+func writeBuildError(stderr io.Writer, err error) int {
+	switch {
+	case compile.IsDefinitionInvalid(err):
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return exitBuildValidation
+	case errors.Is(err, compile.ErrWorkspaceNotFound):
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		fmt.Fprint(stderr, "run 'daedalus init' to create the workspace first\n")
+		return exitBuildCompile
+	case errors.Is(err, compile.ErrNoAdapter):
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return exitBuildCompile
+	default:
+		// A malformed manifest, a compile failure (incl. the not-yet-implemented
+		// adapter) or an I/O write failure: all compilation/write errors (REQ-8).
+		fmt.Fprintf(stderr, "daedalus: build failed: %v\n", err)
+		return exitBuildCompile
+	}
+}
+
+// writeBuildSummary reports the outcome of a build on stdout: per backend, the
+// target and what was created/left intact (REQ-7), with a header that makes a
+// preview unmistakable from a real write. Paths are already slash-normalized by
+// the core, so the summary is byte-identical across OSes (RNF-5).
+func writeBuildSummary(stdout io.Writer, out *compile.Outcome) {
+	if out.Preview {
+		fmt.Fprintf(stdout, "Preview of compiling %s (no files written):\n", filepath.ToSlash(out.Root))
+	} else {
+		fmt.Fprintf(stdout, "Compiled %s:\n", filepath.ToSlash(out.Root))
+	}
+	for _, b := range out.Backends {
+		if out.Preview {
+			fmt.Fprintf(stdout, "  %s: %d artifact%s would be written\n",
+				b.Backend, b.Planned, plural(b.Planned, "", "s"))
+			for _, f := range artifactPreviewList(b) {
+				fmt.Fprintf(stdout, "    + %s\n", f)
+			}
+			continue
+		}
+		fmt.Fprintf(stdout, "  %s: %d created, %d unchanged (of %d artifact%s)\n",
+			b.Backend, len(b.Created), len(b.Unchanged), b.Planned, plural(b.Planned, "", "s"))
+		for _, f := range b.Created {
+			fmt.Fprintf(stdout, "    + %s\n", f)
+		}
+		for _, f := range b.Unchanged {
+			fmt.Fprintf(stdout, "    = %s (unchanged)\n", f)
+		}
+	}
+}
+
+// artifactPreviewList returns nothing today: in --preview the core does not
+// enumerate per-file paths (it stops before computing them). The deep, per-file
+// preview/diff is ticket-06-04's deliverable; this helper is the seam where that
+// list will come from so writeBuildSummary does not change when it lands.
+func artifactPreviewList(_ compile.BackendOutcome) []string {
+	return nil
 }
 
 // runAgent handles the `daedalus agent` subcommand, a thin CLI surface over the
