@@ -33,6 +33,7 @@ index below.
 ### Contributing
 - [Development environment](contributing/development-environment.md) — Make targets, Docker, and Compose.
 - [Continuous integration](contributing/continuous-integration.md) — what CI runs and how to reproduce it.
+- [Testing and golden files](contributing/testing-and-golden-files.md) — running the suite, what golden files are, updating them with `-update`, and the determinism guarantee.
 
 ## How this manual is organized
 
