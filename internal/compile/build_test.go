@@ -170,8 +170,10 @@ func TestBuildPreviewWritesNothing(t *testing.T) {
 	if got := out.Backends[0].Planned; got != 1 {
 		t.Errorf("planned = %d, want 1 (preview still reports what would be written)", got)
 	}
-	if len(out.Backends[0].Created) != 0 {
-		t.Errorf("preview reported created files: %v", out.Backends[0].Created)
+	// Preview classifies what WOULD happen: a fresh workspace ⇒ the artifact would
+	// be created. The classification is reported, but NOTHING is written.
+	if len(out.Backends[0].Created) != 1 {
+		t.Errorf("preview should classify the artifact as would-create; got created=%v", out.Backends[0].Created)
 	}
 	if _, statErr := os.Stat(filepath.Join(root, ".claude")); !os.IsNotExist(statErr) {
 		t.Errorf("preview wrote to the filesystem (stat err=%v)", statErr)

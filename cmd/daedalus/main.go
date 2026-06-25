@@ -347,10 +347,13 @@ func writeBuildError(stderr io.Writer, err error) int {
 	}
 }
 
-// writeBuildSummary reports the outcome of a build on stdout: per backend, the
-// target and what was created/left intact (REQ-7), with a header that makes a
-// preview unmistakable from a real write. Paths are already slash-normalized by
-// the core, so the summary is byte-identical across OSes (RNF-5).
+// writeBuildSummary reports the outcome of a build on stdout: per backend, what
+// was (or would be) created/updated/left unchanged, plus any detected orphans
+// (REQ-7). The core classifies every artifact in both modes — a preview reports
+// exactly what a real run would do — so the wording differs only in tense; the
+// numbers come from the same plan. The deep per-file diff and the confirmation
+// gate are ticket-06-04's job; this is the plain, deterministic summary it builds
+// on. Paths are already slash-normalized by the core (RNF-5).
 func writeBuildSummary(stdout io.Writer, out *compile.Outcome) {
 	if out.Preview {
 		fmt.Fprintf(stdout, "Preview of compiling %s (no files written):\n", filepath.ToSlash(out.Root))
@@ -358,31 +361,26 @@ func writeBuildSummary(stdout io.Writer, out *compile.Outcome) {
 		fmt.Fprintf(stdout, "Compiled %s:\n", filepath.ToSlash(out.Root))
 	}
 	for _, b := range out.Backends {
+		verbCreate, verbUpdate := "created", "updated"
 		if out.Preview {
-			fmt.Fprintf(stdout, "  %s: %d artifact%s would be written\n",
-				b.Backend, b.Planned, plural(b.Planned, "", "s"))
-			for _, f := range artifactPreviewList(b) {
-				fmt.Fprintf(stdout, "    + %s\n", f)
-			}
-			continue
+			verbCreate, verbUpdate = "to create", "to update"
 		}
-		fmt.Fprintf(stdout, "  %s: %d created, %d unchanged (of %d artifact%s)\n",
-			b.Backend, len(b.Created), len(b.Unchanged), b.Planned, plural(b.Planned, "", "s"))
+		fmt.Fprintf(stdout, "  %s: %d %s, %d %s, %d unchanged (of %d artifact%s)\n",
+			b.Backend, len(b.Created), verbCreate, len(b.Updated), verbUpdate,
+			len(b.Unchanged), b.Planned, plural(b.Planned, "", "s"))
 		for _, f := range b.Created {
 			fmt.Fprintf(stdout, "    + %s\n", f)
 		}
-		for _, f := range b.Unchanged {
-			fmt.Fprintf(stdout, "    = %s (unchanged)\n", f)
+		for _, f := range b.Updated {
+			fmt.Fprintf(stdout, "    ~ %s\n", f)
+		}
+		// Orphans are surfaced but never deleted (safe default, RF-6.3). The note
+		// makes the managed-area boundary visible without acting on it; RF-6.4's
+		// preview is where the user decides what to do with them.
+		for _, f := range b.Orphans {
+			fmt.Fprintf(stdout, "    ? %s (orphan: no longer produced; left untouched)\n", f)
 		}
 	}
-}
-
-// artifactPreviewList returns nothing today: in --preview the core does not
-// enumerate per-file paths (it stops before computing them). The deep, per-file
-// preview/diff is ticket-06-04's deliverable; this helper is the seam where that
-// list will come from so writeBuildSummary does not change when it lands.
-func artifactPreviewList(_ compile.BackendOutcome) []string {
-	return nil
 }
 
 // runAgent handles the `daedalus agent` subcommand, a thin CLI surface over the

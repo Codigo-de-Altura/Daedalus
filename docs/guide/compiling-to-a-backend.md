@@ -207,10 +207,84 @@ Daedalus deliberately does **not** fabricate `permissions`, `env`, `hooks`, or a
 `model` here — it never writes configuration you did not define yourself. You stay
 in control of those settings.
 
+## Re-running build: idempotent and non-destructive
+
+`build` is safe to run as often as you like. Every run classifies each artifact it
+manages as **created**, **updated**, or **unchanged**, and prints a short summary
+so you can see exactly what happened — with no surprises and no noise.
+
+### Re-running with no changes does nothing
+
+If you run `build` again without touching `.daedalus/`, the output is already
+correct, so Daedalus rewrites **nothing**. Every artifact is reported as
+`unchanged`, the files stay byte-identical, and there is no churn in your working
+tree (or your Git diff):
+
+```
+Compiled .:
+  claude-code: 0 created, 0 updated, 5 unchanged (of 5 artifacts)
+```
+
+This is the **idempotency** guarantee: the same `.daedalus/` always yields the
+same `.claude/`, run after run.
+
+### Changing part of the definition updates only what changed
+
+When you edit one part of your canonical definition — say, the prompt of a single
+agent — the next build updates **only** the artifact(s) affected and leaves the
+rest `unchanged`. The summary lists each created artifact with a `+` and each
+updated one with a `~`:
+
+```
+Compiled .:
+  claude-code: 0 created, 1 updated, 4 unchanged (of 5 artifacts)
+    ~ agents/reviewer.md
+```
+
+So a small change to your definition produces a correspondingly small, scoped
+change to the generated files — never a wholesale rewrite.
+
+### Your own files are preserved
+
+`build` only manages the files it **produces** — its **managed area**. Any file
+you place by hand that the build does not generate is **preserved intact**,
+whether it sits inside `.claude/` or anywhere else in your repository. `build`
+never deletes or overwrites content outside its managed area. This is the safe
+default: re-compiling can never destroy your manual work.
+
+### Orphans are reported, never deleted
+
+If you remove the canonical source of an artifact that an earlier build generated
+— for example, you delete an agent from your workspace — the previously generated
+native file becomes an **orphan**: a file the current build no longer produces.
+Daedalus **detects** orphans and **reports** them in the summary, marked with a
+`?`, but it does **not** delete them — so nothing is ever removed behind your
+back:
+
+```
+Compiled .:
+  claude-code: 0 created, 0 updated, 4 unchanged (of 4 artifacts)
+    ? agents/reviewer.md (orphan: no longer produced; left untouched)
+```
+
+An orphan is harmless — it is simply a leftover file Daedalus no longer manages.
+If you no longer want it, **delete it yourself**; Daedalus leaves that decision to
+you.
+
+> A finer, interactive way to review and confirm these changes before they are
+> written is planned for a later release; this chapter will be expanded to cover
+> it when it ships.
+
 ## Notes & limitations
 
 - **Deterministic.** The same workspace state always produces the same output,
   byte for byte, with stable, kebab-case file names derived from canonical ids.
+- **Idempotent.** Re-running `build` with no canonical changes rewrites nothing —
+  every artifact is reported `unchanged` and the files stay byte-identical, so
+  there is no churn in your working tree.
+- **Non-destructive.** `build` manages only the files it produces; your own
+  hand-made files are preserved, and orphaned artifacts (whose canonical source
+  you removed) are reported but never deleted.
 - **Validate-first, all-or-nothing.** If the workspace is missing, the canonical
   definition is invalid, or the configured backend has no adapter, `build` aborts
   and writes nothing — your repository is left untouched.

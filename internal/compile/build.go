@@ -3,7 +3,6 @@ package compile
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -45,10 +44,18 @@ type BackendOutcome struct {
 	Backend string
 	// Planned is the number of native artifacts the adapter produced.
 	Planned int
-	// Created and Unchanged partition the written artifacts. In Preview mode both
-	// are zero (nothing was written); Planned still reflects what would be written.
+	// Created, Updated and Unchanged partition the produced artifacts by what the
+	// run did with each (RF-6.3): Created were newly written, Updated were rewritten
+	// because their canonical source changed, Unchanged were byte-identical and left
+	// completely untouched. In Preview mode these reflect what WOULD happen (the plan
+	// classification), computed without writing.
 	Created   []string
+	Updated   []string
 	Unchanged []string
+	// Orphans are files inside the managed directories the current build no longer
+	// produces. They are detected and reported but NEVER deleted (safe default,
+	// Check-8); the preview (RF-6.4) surfaces them for the user to act on manually.
+	Orphans []string
 }
 
 // Outcome is the whole build's result: the resolved target backends and a
@@ -153,21 +160,43 @@ func Build(opts Options) (*Outcome, error) {
 		logger.Info("backend compiled", "backend", backend, "artifacts", len(arts.Files))
 	}
 
-	// 5. Write (or, in Preview, do not). Every gate has passed; only now do we
-	// touch the filesystem.
+	// 5. Plan against the current on-disk state, then write (or, in Preview, do
+	// not). We always compute the pure plan first — it classifies every produced
+	// artifact (created/updated/unchanged) and detects orphans without writing — so
+	// a preview reports exactly what a real run would do, and a real run reuses the
+	// same classification for its compare-and-skip writes (RF-6.3/RF-6.4).
 	out := &Outcome{Root: root, Preview: opts.Preview}
 	for _, p := range plans {
-		bo := BackendOutcome{Backend: p.artifacts.Backend, Planned: len(p.artifacts.Files)}
-		if !opts.Preview {
-			created, unchanged, err := writeArtifacts(root, p.artifacts.Files)
+		plan, err := PlanArtifacts(root, p.artifacts)
+		if err != nil {
+			logger.Error("build failed", "phase", "plan", "backend", p.artifacts.Backend, "err", err)
+			return nil, fmt.Errorf("planning backend %q: %w", p.artifacts.Backend, err)
+		}
+
+		bo := BackendOutcome{
+			Backend: p.artifacts.Backend,
+			Planned: len(p.artifacts.Files),
+			Orphans: plan.Orphans,
+		}
+
+		if opts.Preview {
+			// Report what WOULD happen, computed from the plan, with no writes.
+			for _, pa := range plan.Artifacts {
+				bo.append(pa.Status, pa.RelPath)
+			}
+			logger.Info("backend planned", "backend", p.artifacts.Backend,
+				"created", len(bo.Created), "updated", len(bo.Updated),
+				"unchanged", len(bo.Unchanged), "orphans", len(plan.Orphans))
+		} else {
+			created, updated, unchanged, err := writeArtifacts(root, p.artifacts.Files)
 			if err != nil {
 				logger.Error("build failed", "phase", "write", "backend", p.artifacts.Backend, "err", err)
 				return nil, fmt.Errorf("writing backend %q: %w", p.artifacts.Backend, err)
 			}
-			bo.Created = created
-			bo.Unchanged = unchanged
+			bo.Created, bo.Updated, bo.Unchanged = created, updated, unchanged
 			logger.Info("backend written", "backend", p.artifacts.Backend,
-				"created", len(created), "unchanged", len(unchanged))
+				"created", len(created), "updated", len(updated),
+				"unchanged", len(unchanged), "orphans", len(plan.Orphans))
 		}
 		out.Backends = append(out.Backends, bo)
 	}
@@ -176,59 +205,93 @@ func Build(opts Options) (*Outcome, error) {
 	return out, nil
 }
 
-// writeArtifacts materializes a backend's artifacts under root and reports which
-// were created vs. left intact.
-//
-// SCOPE BOUNDARY (RF-6.3): this is a minimal, non-destructive writer — it creates
-// parent directories and writes each file with O_CREATE|O_EXCL, so an existing
-// file is never overwritten (a manual change survives). The full idempotent,
-// non-destructive-of-the-managed-area strategy (re-writing managed artifacts that
-// changed while preserving manual edits outside the managed area, with the diff
-// that drives it) is ticket-06-03's deliverable and will replace this body. The
-// signature — (created, unchanged, err) — is shaped for that successor so the
-// orchestration above does not change.
-func writeArtifacts(root string, files []Artifact) (created, unchanged []string, err error) {
-	for _, f := range files {
-		abs := filepath.Join(root, filepath.FromSlash(f.RelPath))
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			return nil, nil, err
-		}
-		wrote, err := ensureFile(abs, f.Content)
-		if err != nil {
-			return nil, nil, err
-		}
-		if wrote {
-			created = append(created, f.RelPath)
-		} else {
-			unchanged = append(unchanged, f.RelPath)
-		}
+// append records relPath under the slice matching status, so the preview path and
+// the write path produce the same partitioning of the produced artifacts.
+func (bo *BackendOutcome) append(status ArtifactStatus, relPath string) {
+	switch status {
+	case StatusCreated:
+		bo.Created = append(bo.Created, relPath)
+	case StatusUpdated:
+		bo.Updated = append(bo.Updated, relPath)
+	default:
+		bo.Unchanged = append(bo.Unchanged, relPath)
 	}
-	return created, unchanged, nil
 }
 
-// ensureFile creates a file at path with content only if it does not already
-// exist. O_EXCL makes the create-or-skip atomic and non-destructive: an existing
-// file is never truncated. It reports whether it created a new file. This mirrors
-// the workspace/catalog helpers of the same name; it is duplicated rather than
-// shared because those are unexported and this package's write semantics will
-// evolve independently (ticket-06-03).
-func ensureFile(path, content string) (bool, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return false, nil
+// writeArtifacts applies a backend's artifacts under root with the idempotent,
+// non-destructive write strategy (RF-6.3), and reports what it did per file.
+//
+// Managed area: the set of paths in `files` — and ONLY those — is what this build
+// touches (REQ-1/REQ-7). Anything else on disk, inside or outside `.claude/`, is
+// never read for writing, never overwritten and never deleted (REQ-3/REQ-5): a
+// user's manual file the build does not produce survives untouched. Orphans (files
+// in the managed directories the current build no longer produces) are detected by
+// PlanArtifacts and exposed for the preview, but this writer leaves them in place
+// — the safe default (Check-8).
+//
+// Per artifact it does compare-and-skip: it classifies the target against disk and
+//   - StatusUnchanged ⇒ writes NOTHING (no truncate, no rename, no mtime churn), so
+//     a re-run over an unchanged definition leaves the tree byte-identical with zero
+//     spurious writes (REQ-2/Check-1/Check-2);
+//   - StatusCreated/StatusUpdated ⇒ writes atomically (temp + rename), so a reader
+//     never sees a partial file and a crash leaves the previous content intact.
+//
+// The change is always bounded to the managed area and reproducible (REQ-6): only
+// artifacts whose canonical source changed end up updated.
+func writeArtifacts(root string, files []Artifact) (created, updated, unchanged []string, err error) {
+	for _, f := range files {
+		status, cerr := classify(root, f)
+		if cerr != nil {
+			return nil, nil, nil, cerr
 		}
-		return false, err
+		if status == StatusUnchanged {
+			unchanged = append(unchanged, f.RelPath)
+			continue
+		}
+
+		abs := filepath.Join(root, filepath.FromSlash(f.RelPath))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			return nil, nil, nil, err
+		}
+		if err := writeAtomic(abs, f.Content); err != nil {
+			return nil, nil, nil, err
+		}
+		if status == StatusCreated {
+			created = append(created, f.RelPath)
+		} else {
+			updated = append(updated, f.RelPath)
+		}
 	}
-	_, writeErr := f.WriteString(content)
-	closeErr := f.Close()
-	if writeErr != nil {
-		return false, writeErr
+	return created, updated, unchanged, nil
+}
+
+// writeAtomic writes content to path atomically: it writes to a temporary file in
+// the same directory and renames it over path. The rename is atomic on the same
+// filesystem, so a reader sees either the old or the new content, never a partial
+// write — and a crash mid-write leaves the original intact. On any failure the
+// temp file is cleaned up so we never litter the managed directory. This mirrors
+// the workspace/prompts/catalog helpers of the same name; it is duplicated rather
+// than shared because those are unexported and this package owns its own write
+// semantics. The temp name shape (".<base>.tmp-*") is what detectOrphans skips.
+func writeAtomic(path, content string) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
 	}
-	if closeErr != nil {
-		return false, closeErr
+	tmpName := tmp.Name()
+	// Best-effort cleanup if we bail before a successful rename; after a successful
+	// rename tmpName no longer exists so the Remove is a harmless no-op.
+	defer os.Remove(tmpName)
+
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return err
 	}
-	return true, nil
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // noopWriter discards everything, backing the default no-op logger so a caller
