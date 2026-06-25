@@ -36,7 +36,9 @@ daedalus sync
 ```
 
 Daedalus reads the target backend from `daedalus.yaml`, validates your canonical
-definition, and compiles it into that backend's native format.
+definition, and — **in an interactive terminal** — shows you a
+[preview of every change and asks you to confirm](#previewing-and-confirming-changes)
+before writing anything.
 
 To target a repository in a different directory, use `--path`:
 
@@ -55,8 +57,14 @@ daedalus build --help
 | Option | Description |
 |---|---|
 | `--path <dir>` | Repository directory to compile. Defaults to the current directory. |
-| `--preview` | Dry run: compute the result **without writing** anything to disk. |
+| `--preview` | Show the diff/preview and **exit without writing** anything (a read-only dry run). |
+| `--yes` | Write **without** the interactive confirmation, for scripts and CI. See [Writing from a script or CI](#writing-from-a-script-or-ci). |
 | `--help` | Show all available options. |
+
+> By default, running `build` in a terminal opens an interactive preview and
+> writes only after you confirm — nothing is written silently. The exact behavior
+> depends on whether you are in a terminal and which flags you pass; see
+> [Previewing and confirming changes](#previewing-and-confirming-changes).
 
 ## Safe by design: validate first, write nothing on error
 
@@ -78,21 +86,103 @@ through. In each of the cases below it stops and reports an actionable error, an
 This validate-first behavior means a failed `build` always leaves your repository
 exactly as it was.
 
-## Previewing without writing
+## Previewing and confirming changes
 
-Use `--preview` to perform a **dry run**: Daedalus computes what the build would
-do but **writes nothing** to disk.
+`build` never writes silently. In an interactive terminal it first opens a
+**preview** of every change and waits for your explicit confirmation before it
+touches disk — so you always see exactly what would change and decide whether to
+apply it.
+
+### The interactive preview
+
+Run `build` in a terminal:
+
+```sh
+daedalus build
+```
+
+Daedalus computes the full plan and opens a preview screen. At the top is a
+**summary** of the counts per backend; below it, the artifacts are listed and
+classified as **new**, **modified**, or **unchanged**; and for the artifact you
+select, the **content diff** is shown — added lines prefixed with `+`, removed
+lines with `-`. At the bottom is the **confirmation gate**:
+
+```
+claude-code: 1 new, 1 modified, 3 unchanged
+
+  [new]        commands/summarize.md
+  [modified]   agents/reviewer.md
+  [unchanged]  agents/planner.md
+  [unchanged]  settings.json
+  [unchanged]  commands/release-notes.md
+
+  agents/reviewer.md
+  - You are the code reviewer. Report correctness and style issues.
+  + You are the code reviewer. Inspect the proposed changes and report any
+  + correctness, security, or style issues, worst-first.
+
+Write these changes? y/enter to confirm · n/esc to cancel (nothing is written)
+```
+
+Controls:
+
+- **↑ / ↓** — move between artifacts in the list.
+- **pgup / pgdn**, and **g / G** — scroll the diff of the selected artifact (top
+  and bottom).
+- **y** or **enter** — confirm and write the changes.
+- **n** or **esc** — cancel; **nothing is written** and your repository is left
+  exactly as it was.
+- **ctrl+c** — exit at any time.
+
+If there is nothing to write, the preview says so plainly and there is nothing to
+confirm:
+
+```
+No changes — every artifact is already up to date.
+```
+
+#### Orphans in the preview
+
+Any [orphans](#orphans-are-reported-never-deleted) — generated files whose
+canonical source you removed — appear in their own read-only section, headed
+**“Orphans — left untouched · not selectable.”** They are shown for your
+awareness only: you cannot navigate into them, and Daedalus never deletes them.
+Remove an orphan yourself if you no longer want it.
+
+### Preview only, never write (`--preview`)
+
+Use `--preview` to inspect the plan **without the option to write**:
 
 ```sh
 daedalus build --preview
 ```
 
-This lets you check that the canonical definition is valid and resolves to a
-backend before you commit to writing anything. Run the command again without
-`--preview` to apply the result.
+In a terminal this opens the same preview screen in **read-only** mode — you can
+browse the list and diffs, but there is no confirmation gate, and the footer
+reads *“Read-only preview — nothing will be written.”* Outside a terminal it
+prints the plan and diff as text. Either way, `--preview` never writes.
 
-> An interactive preview-and-confirm step is planned for a later release; this
-> chapter will be expanded to cover it when it ships.
+### Writing from a script or CI
+
+When `build` runs **without an interactive terminal** — a script, CI, or a
+container with no TTY — there is no one to confirm at the gate. To keep the safe
+default, a plain `build` in that situation **writes nothing**: it prints the plan
+and diff, then tells you how to proceed:
+
+```
+Nothing written; pass --yes to write, or run in a terminal to confirm.
+```
+
+To actually write from automation, pass `--yes`, which skips the interactive gate
+and compiles directly:
+
+```sh
+daedalus build --yes
+```
+
+`--yes` is the non-interactive write path; it works with or without a terminal.
+(If you pass both `--preview` and `--yes`, `--preview` wins — an explicit dry-run
+request never writes.)
 
 ## Exit codes
 
@@ -271,9 +361,9 @@ An orphan is harmless — it is simply a leftover file Daedalus no longer manage
 If you no longer want it, **delete it yourself**; Daedalus leaves that decision to
 you.
 
-> A finer, interactive way to review and confirm these changes before they are
-> written is planned for a later release; this chapter will be expanded to cover
-> it when it ships.
+To review these classifications artifact by artifact — and the exact content
+changes — before anything is written, use the
+[interactive preview](#previewing-and-confirming-changes).
 
 ## Notes & limitations
 
@@ -285,6 +375,10 @@ you.
 - **Non-destructive.** `build` manages only the files it produces; your own
   hand-made files are preserved, and orphaned artifacts (whose canonical source
   you removed) are reported but never deleted.
+- **Nothing is written without your say-so.** In a terminal, `build` shows an
+  interactive preview and writes only after you confirm; cancel and nothing
+  changes. Without a terminal it writes nothing unless you pass `--yes`, and
+  `--preview` never writes.
 - **Validate-first, all-or-nothing.** If the workspace is missing, the canonical
   definition is invalid, or the configured backend has no adapter, `build` aborts
   and writes nothing — your repository is left untouched.

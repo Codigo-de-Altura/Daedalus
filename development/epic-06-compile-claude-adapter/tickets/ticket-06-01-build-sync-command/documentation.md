@@ -49,8 +49,9 @@ daedalus build --path ./my-repo
 - **Deterministic.** The same workspace state always produces the same result.
 - **Backend comes from the manifest.** `build` compiles to the backend recorded in
   `daedalus.yaml` (set with `daedalus init --backend`).
-- The exact native artifacts produced for Claude Code are documented together with
-  the Claude Code adapter, in a forthcoming section of the manual chapter.
+- The exact native artifacts produced for Claude Code are documented in the
+  [Claude Code backend](../../../../docs/guide/compiling-to-a-backend.md#the-claude-code-backend--claude)
+  section of the manual chapter.
 - **Phase 1:** Daedalus configures the AI structure; it does not execute agents.
 
 See the full chapter — worked usage, safety behavior, preview, and exit codes —

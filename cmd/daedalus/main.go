@@ -292,12 +292,17 @@ func runBuild(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	dir := fs.String("path", ".", "target repository directory whose .daedalus/ workspace is compiled")
 	preview := fs.Bool("preview", false, "show what would be compiled without writing anything (dry run)")
+	yes := fs.Bool("yes", false, "write without the interactive confirmation gate (for CI/non-interactive use)")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, "Usage: daedalus build [flags]   (alias: daedalus sync)\n\n"+
 			"Compile the canonical .daedalus/ definition to the native format of the\n"+
 			"backend(s) configured in daedalus.yaml. The definition is validated before\n"+
 			"anything is written; an invalid definition aborts the build with nothing\n"+
-			"changed. --preview reports the plan without writing.\n\nFlags:\n")
+			"changed.\n\n"+
+			"In an interactive terminal, build shows a diff/preview and asks you to\n"+
+			"confirm before writing (RF-6.4). --preview shows the diff and never writes.\n"+
+			"--yes writes without the gate (CI). Without a terminal and without --yes,\n"+
+			"build prints the diff and writes nothing.\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -309,16 +314,82 @@ func runBuild(args []string, stdout, stderr io.Writer) int {
 
 	logger := logging.New(stderr)
 
-	out, err := compile.Build(compile.Options{
-		Root:    *dir,
-		Preview: *preview,
-		Logger:  logger,
-	})
+	// --yes is the non-interactive write path (CI), valid with or without a TTY: it
+	// reuses the original compile.Build + summary flow with no gate. --preview takes
+	// precedence over --yes if both are passed (preview never writes), so an
+	// explicit dry-run request is always honored.
+	if *yes && !*preview {
+		out, err := compile.Build(compile.Options{Root: *dir, Preview: false, Logger: logger})
+		if err != nil {
+			return writeBuildError(stderr, err)
+		}
+		writeBuildSummary(stdout, out)
+		return exitBuildOK
+	}
+
+	// Interactive terminal: launch the diff/preview TUI. In --preview it is
+	// read-only (view + quit, never writes); otherwise it gates the write behind an
+	// explicit confirmation (RF-6.4/RNF-8).
+	if isInteractive() {
+		return runBuildInteractive(*dir, *preview, stdout, stderr, logger)
+	}
+
+	// No terminal and no --yes (or --preview without a terminal): print the textual
+	// diff/plan and write nothing. The plan runs the same validate-before-anything
+	// pipeline, so a missing workspace or invalid definition still fails with the
+	// right exit code — just with nothing written.
+	return runBuildTextualPreview(*dir, *preview, stdout, stderr, logger)
+}
+
+// runBuildInteractive launches the Bubble Tea build preview and maps its outcome
+// to the build exit codes. readOnly is --preview (no confirm/write). On confirm
+// the model invokes compile.Build itself (through the tui package), recompiling at
+// confirm time (TOCTOU-safe); here we only render the result and pick the code.
+func runBuildInteractive(dir string, readOnly bool, stdout, stderr io.Writer, logger *slog.Logger) int {
+	res, err := tui.RunBuildPreview(dir, readOnly)
+	if err != nil {
+		logger.Error("build preview failed", "err", err)
+		fmt.Fprintf(stderr, "daedalus: build preview failed: %v\n", err)
+		return exitBuildCompile
+	}
+
+	switch {
+	case res.PlanErr != nil:
+		return writeBuildError(stderr, res.PlanErr)
+	case res.WriteErr != nil:
+		fmt.Fprintf(stderr, "daedalus: build failed: %v\n", res.WriteErr)
+		return exitBuildCompile
+	case res.Wrote:
+		writeBuildSummary(stdout, res.Outcome)
+		return exitBuildOK
+	case res.NoChanges:
+		fmt.Fprintln(stdout, "Nothing to write — everything is already up to date.")
+		return exitBuildOK
+	default:
+		// Cancelled, or quit a read-only preview: nothing was written.
+		fmt.Fprintln(stdout, "Cancelled — nothing was written.")
+		return exitBuildOK
+	}
+}
+
+// runBuildTextualPreview computes the plan and prints it as text WITHOUT writing,
+// for the no-TTY paths: `--preview` piped/in CI, and a plain `build` with neither
+// a terminal nor --yes. The second case adds a clear notice that nothing was
+// written and how to write (RF-6.4 decision: never write without a confirmation or
+// --yes). Exit 0 on success; plan failures map to the usual build exit codes.
+func runBuildTextualPreview(dir string, explicitPreview bool, stdout, stderr io.Writer, logger *slog.Logger) int {
+	res, err := compile.Plan(compile.Options{Root: dir, Logger: logger})
 	if err != nil {
 		return writeBuildError(stderr, err)
 	}
 
-	writeBuildSummary(stdout, out)
+	tui.RenderPlanText(stdout, res)
+
+	if !explicitPreview {
+		// A plain `build` with no terminal and no --yes is a safe dry run: say so and
+		// tell the user how to actually write.
+		fmt.Fprintln(stdout, "\nNothing written; pass --yes to write, or run in a terminal to confirm.")
+	}
 	return exitBuildOK
 }
 

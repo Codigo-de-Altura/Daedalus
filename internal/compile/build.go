@@ -90,74 +90,13 @@ type Outcome struct {
 // the definition is loaded id-sorted, so the same workspace yields the same
 // Outcome and the same artifacts.
 func Build(opts Options) (*Outcome, error) {
-	root := opts.Root
-	if root == "" {
-		root = "."
-	}
-	logger := opts.Logger
-	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(noopWriter{}, nil))
-	}
-	reg := opts.Registry
-	if reg == nil {
-		reg = DefaultRegistry()
-	}
+	root, logger, _ := resolveOptions(opts)
 
-	// 1. Locate the workspace. We require the manifest to exist: it is both the
-	// proof a workspace is here (REQ-2) and the source of the target backends
-	// (REQ-4), so a single read settles both.
-	manifest, err := workspace.ReadManifest(root)
+	// Stages 1–4 (locate, validate, route, compile) are shared with Plan: an
+	// invalid definition or an unroutable backend aborts here, before any write.
+	compiled, err := resolveAndCompile(opts)
 	if err != nil {
-		if errors.Is(err, workspace.ErrManifestNotFound) {
-			logger.Error("build aborted", "phase", "locate", "root", filepath.ToSlash(root), "reason", "no workspace")
-			return nil, fmt.Errorf("%w at %s", ErrWorkspaceNotFound, filepath.ToSlash(filepath.Join(root, workspace.Name)))
-		}
-		// A malformed manifest is a real, actionable failure (not a missing
-		// workspace); surface it as-is so the command reports it as a build error.
-		logger.Error("build aborted", "phase", "locate", "root", filepath.ToSlash(root), "err", err)
 		return nil, err
-	}
-	logger.Info("workspace located", "root", filepath.ToSlash(root), "backends", manifest.Backends)
-
-	// 3. Validate the canonical definition BEFORE any adapter or write (REQ-3).
-	// Loading here, before the per-backend loop, means an invalid definition aborts
-	// the whole build once, with nothing written.
-	def, err := LoadDefinition(root)
-	if err != nil {
-		if IsDefinitionInvalid(err) {
-			logger.Error("build aborted", "phase", "validate", "root", filepath.ToSlash(root), "err", err)
-		} else {
-			logger.Error("build failed", "phase", "load", "root", filepath.ToSlash(root), "err", err)
-		}
-		return nil, err
-	}
-	logger.Info("definition validated", "agents", len(def.Agents))
-
-	// 4. Resolve and compile each backend through the registry. We compile ALL
-	// backends before writing ANY, so a single unroutable or failing backend
-	// aborts the whole build with nothing on disk — the same validate-before-write
-	// guarantee, extended across backends.
-	type compiled struct {
-		artifacts Artifacts
-	}
-	plans := make([]compiled, 0, len(manifest.Backends))
-	for _, backend := range manifest.Backends {
-		comp, err := reg.Lookup(backend)
-		if err != nil {
-			logger.Error("build aborted", "phase", "route", "backend", backend, "err", err)
-			return nil, err
-		}
-		arts, err := comp.Compile(def)
-		if err != nil {
-			logger.Error("build failed", "phase", "compile", "backend", backend, "err", err)
-			return nil, fmt.Errorf("compiling backend %q: %w", backend, err)
-		}
-		// Defend the contract: a Compiler must label its output with its own key.
-		if arts.Backend == "" {
-			arts.Backend = backend
-		}
-		plans = append(plans, compiled{artifacts: arts})
-		logger.Info("backend compiled", "backend", backend, "artifacts", len(arts.Files))
 	}
 
 	// 5. Plan against the current on-disk state, then write (or, in Preview, do
@@ -166,16 +105,16 @@ func Build(opts Options) (*Outcome, error) {
 	// a preview reports exactly what a real run would do, and a real run reuses the
 	// same classification for its compare-and-skip writes (RF-6.3/RF-6.4).
 	out := &Outcome{Root: root, Preview: opts.Preview}
-	for _, p := range plans {
-		plan, err := PlanArtifacts(root, p.artifacts)
+	for _, arts := range compiled {
+		plan, err := PlanArtifacts(root, arts)
 		if err != nil {
-			logger.Error("build failed", "phase", "plan", "backend", p.artifacts.Backend, "err", err)
-			return nil, fmt.Errorf("planning backend %q: %w", p.artifacts.Backend, err)
+			logger.Error("build failed", "phase", "plan", "backend", arts.Backend, "err", err)
+			return nil, fmt.Errorf("planning backend %q: %w", arts.Backend, err)
 		}
 
 		bo := BackendOutcome{
-			Backend: p.artifacts.Backend,
-			Planned: len(p.artifacts.Files),
+			Backend: arts.Backend,
+			Planned: len(arts.Files),
 			Orphans: plan.Orphans,
 		}
 
@@ -184,17 +123,17 @@ func Build(opts Options) (*Outcome, error) {
 			for _, pa := range plan.Artifacts {
 				bo.append(pa.Status, pa.RelPath)
 			}
-			logger.Info("backend planned", "backend", p.artifacts.Backend,
+			logger.Info("backend planned", "backend", arts.Backend,
 				"created", len(bo.Created), "updated", len(bo.Updated),
 				"unchanged", len(bo.Unchanged), "orphans", len(plan.Orphans))
 		} else {
-			created, updated, unchanged, err := writeArtifacts(root, p.artifacts.Files)
+			created, updated, unchanged, err := writeArtifacts(root, arts.Files)
 			if err != nil {
-				logger.Error("build failed", "phase", "write", "backend", p.artifacts.Backend, "err", err)
-				return nil, fmt.Errorf("writing backend %q: %w", p.artifacts.Backend, err)
+				logger.Error("build failed", "phase", "write", "backend", arts.Backend, "err", err)
+				return nil, fmt.Errorf("writing backend %q: %w", arts.Backend, err)
 			}
 			bo.Created, bo.Updated, bo.Unchanged = created, updated, unchanged
-			logger.Info("backend written", "backend", p.artifacts.Backend,
+			logger.Info("backend written", "backend", arts.Backend,
 				"created", len(created), "updated", len(updated),
 				"unchanged", len(unchanged), "orphans", len(plan.Orphans))
 		}
@@ -216,6 +155,137 @@ func (bo *BackendOutcome) append(status ArtifactStatus, relPath string) {
 	default:
 		bo.Unchanged = append(bo.Unchanged, relPath)
 	}
+}
+
+// PlanResult is the whole plan of a build computed WITHOUT writing anything: the
+// resolved target root and, per backend (in manifest order), the enriched
+// BackendPlan that carries every artifact's status and its Current/Target content
+// for diffing, plus the detected orphans. It is what the interactive preview
+// (RF-6.4) consumes to render the diff and the confirm/cancel gate; on confirm the
+// caller invokes Build (non-preview), which recompiles deterministically and
+// writes — recompiling at confirm time avoids any TOCTOU between preview and write
+// and is cheap because Compile is pure.
+type PlanResult struct {
+	// Root is the resolved target repository directory the plan was computed for.
+	Root string
+	// Backends are the per-backend plans, in manifest order, each enriched with
+	// per-artifact Current/Target content and the backend's orphans.
+	Backends []BackendPlan
+}
+
+// Plan computes the full build plan for every backend in the manifest WITHOUT
+// writing anything (RF-6.4). It runs the same locate → validate → route → compile
+// pipeline as Build — so it fails identically on a missing workspace, an invalid
+// definition or an unroutable backend, before producing any plan — then classifies
+// each produced artifact against disk and returns the enriched BackendPlan (status
+// + Current/Target for the diff) plus orphans.
+//
+// It is the read-only half the presentation layer calls: the TUI shows what Plan
+// returns and, on confirmation, calls Build. Plan never writes, so a preview can
+// never mutate the workspace (the --preview / no-TTY-no-yes guarantee). It is
+// deterministic: backends in manifest order, artifacts in emission order, orphans
+// sorted. The Preview field of Options is irrelevant here (Plan never writes
+// regardless); the field is honored by Build.
+func Plan(opts Options) (*PlanResult, error) {
+	root, logger, _ := resolveOptions(opts)
+
+	compiled, err := resolveAndCompile(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &PlanResult{Root: root}
+	for _, arts := range compiled {
+		plan, err := PlanArtifacts(root, arts)
+		if err != nil {
+			logger.Error("plan failed", "phase", "plan", "backend", arts.Backend, "err", err)
+			return nil, fmt.Errorf("planning backend %q: %w", arts.Backend, err)
+		}
+		res.Backends = append(res.Backends, plan)
+		logger.Info("backend planned", "backend", arts.Backend,
+			"artifacts", len(plan.Artifacts), "orphans", len(plan.Orphans))
+	}
+
+	logger.Info("plan done", "backends", len(res.Backends))
+	return res, nil
+}
+
+// resolveOptions applies the Options defaults shared by Build and Plan: a "."
+// root, a no-op logger, and the DefaultRegistry. Centralizing it keeps the two
+// entry points in lockstep so they can never drift on defaulting.
+func resolveOptions(opts Options) (root string, logger *slog.Logger, reg *Registry) {
+	root = opts.Root
+	if root == "" {
+		root = "."
+	}
+	logger = opts.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(noopWriter{}, nil))
+	}
+	reg = opts.Registry
+	if reg == nil {
+		reg = DefaultRegistry()
+	}
+	return root, logger, reg
+}
+
+// resolveAndCompile runs the safe, write-free front half of the pipeline shared by
+// Build and Plan: locate the workspace (REQ-2), validate the canonical definition
+// before anything else (REQ-3), then route each manifest backend through the
+// registry (REQ-5) and compile it (a pure mapping). It compiles ALL backends
+// before returning, so a single unroutable or failing backend aborts the whole
+// operation with nothing produced — the validate-before-write guarantee, extended
+// across backends. The returned artifacts are in manifest order (determinism).
+func resolveAndCompile(opts Options) ([]Artifacts, error) {
+	root, logger, reg := resolveOptions(opts)
+
+	// 1. Locate the workspace. The manifest is both the proof a workspace is here
+	// (REQ-2) and the source of the target backends (REQ-4), so one read settles
+	// both.
+	manifest, err := workspace.ReadManifest(root)
+	if err != nil {
+		if errors.Is(err, workspace.ErrManifestNotFound) {
+			logger.Error("build aborted", "phase", "locate", "root", filepath.ToSlash(root), "reason", "no workspace")
+			return nil, fmt.Errorf("%w at %s", ErrWorkspaceNotFound, filepath.ToSlash(filepath.Join(root, workspace.Name)))
+		}
+		logger.Error("build aborted", "phase", "locate", "root", filepath.ToSlash(root), "err", err)
+		return nil, err
+	}
+	logger.Info("workspace located", "root", filepath.ToSlash(root), "backends", manifest.Backends)
+
+	// 2. Validate the canonical definition before any adapter (REQ-3).
+	def, err := LoadDefinition(root)
+	if err != nil {
+		if IsDefinitionInvalid(err) {
+			logger.Error("build aborted", "phase", "validate", "root", filepath.ToSlash(root), "err", err)
+		} else {
+			logger.Error("build failed", "phase", "load", "root", filepath.ToSlash(root), "err", err)
+		}
+		return nil, err
+	}
+	logger.Info("definition validated", "agents", len(def.Agents), "commands", len(def.Commands))
+
+	// 3. Route and compile each backend through the registry.
+	compiled := make([]Artifacts, 0, len(manifest.Backends))
+	for _, backend := range manifest.Backends {
+		comp, err := reg.Lookup(backend)
+		if err != nil {
+			logger.Error("build aborted", "phase", "route", "backend", backend, "err", err)
+			return nil, err
+		}
+		arts, err := comp.Compile(def)
+		if err != nil {
+			logger.Error("build failed", "phase", "compile", "backend", backend, "err", err)
+			return nil, fmt.Errorf("compiling backend %q: %w", backend, err)
+		}
+		// Defend the contract: a Compiler must label its output with its own key.
+		if arts.Backend == "" {
+			arts.Backend = backend
+		}
+		compiled = append(compiled, arts)
+		logger.Info("backend compiled", "backend", backend, "artifacts", len(arts.Files))
+	}
+	return compiled, nil
 }
 
 // writeArtifacts applies a backend's artifacts under root with the idempotent,
@@ -240,7 +310,7 @@ func (bo *BackendOutcome) append(status ArtifactStatus, relPath string) {
 // artifacts whose canonical source changed end up updated.
 func writeArtifacts(root string, files []Artifact) (created, updated, unchanged []string, err error) {
 	for _, f := range files {
-		status, cerr := classify(root, f)
+		status, _, cerr := classify(root, f)
 		if cerr != nil {
 			return nil, nil, nil, cerr
 		}

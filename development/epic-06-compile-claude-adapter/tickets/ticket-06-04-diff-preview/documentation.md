@@ -1,33 +1,54 @@
-# Diff / Preview Before Writing — Usage Guide
+# Diff / preview before writing — Usage Guide
 
-> Authored and maintained by C-3PO, technical writer for Daedalus. This guide is for the **end user** of Daedalus, not for internals.
-
----
+> Audience: end users of Daedalus. Authored and maintained by **C-3PO** as the feature is implemented and validated.
+>
+> **Canonical guide:** the full chapter lives in the user manual at
+> [`docs/guide/compiling-to-a-backend.md`](../../../../docs/guide/compiling-to-a-backend.md)
+> — see [Previewing and confirming changes](../../../../docs/guide/compiling-to-a-backend.md#previewing-and-confirming-changes)
+> ([manual index](../../../../docs/README.md)). This file is a pointer and summary; the manual is the growing source of truth.
 
 ## Overview
 
-_To be completed by C-3PO after implementation._
+`daedalus build` never writes silently. In an interactive terminal it opens a
+**preview** of every change and waits for your explicit confirmation before
+touching disk. You see, per backend, the counts (new / modified / unchanged) and
+any orphans; the artifacts classified as **new / modified / unchanged**; and, for
+the selected modified artifact, the content **diff** (`+` added / `-` removed
+lines). Confirm to write, cancel and nothing changes.
 
-## How to use
+## Controls
 
-When you compile your project, Daedalus shows you a **preview** of every change before touching disk. For each generated artifact you see whether it would be:
+- **↑ / ↓** — move between artifacts.
+- **pgup / pgdn**, **g / G** — scroll the selected artifact's diff.
+- **y** / **enter** — confirm and write.
+- **n** / **esc** — cancel; nothing is written.
+- **ctrl+c** — exit any time.
 
-- **new** — the file does not exist yet,
-- **modified** — the file exists and its content would change (the change detail is shown),
-- **unchanged** — nothing would change.
+Orphans appear in a separate read-only section (“left untouched · not
+selectable”) — reported, never deleted. When there is nothing to write, the
+screen says *“No changes — every artifact is already up to date.”*
 
-You then **confirm** to write, or **cancel** to keep everything as is. If you cancel, nothing is written.
+## Modes (flags)
 
-You can also run a preview-only pass that shows the diff and exits without writing.
+| Invocation | Behavior |
+|---|---|
+| `daedalus build` (in a terminal) | Opens the preview and writes **only after you confirm**. |
+| `daedalus build --preview` | Shows the diff/preview and **exits without writing** (read-only in a terminal; textual otherwise). |
+| `daedalus build --yes` | Writes **without** the gate — for scripts / CI / non-interactive use. |
+| `daedalus build` (no terminal, no `--yes`) | Prints the plan/diff and **writes nothing**: *“Nothing written; pass --yes to write, or run in a terminal to confirm.”* |
 
-## Options / flags
-
-- _Preview / preview-only flags and confirmation controls to be completed by C-3PO after implementation._
-- Navigation and confirm/cancel shortcuts are shown on screen in the TUI.
+> Automating a build? A plain `build` without a terminal writes nothing by design;
+> pass `--yes` to write from a script or CI. (`--preview` always wins over `--yes`.)
 
 ## Notes & limitations
 
-- Nothing is written until you explicitly confirm — writes are non-destructive by default.
-- The preview only covers Daedalus's managed area; manual changes you make outside that area are preserved and are not shown as changes.
-- When there is nothing to change, the report says so clearly.
-- **Phase 1: Daedalus configures the AI structure; it does not execute agents.** The preview shows configuration changes, not agent runs.
+- **Nothing is written without confirmation** (or `--yes`). Cancelling leaves the
+  repository exactly as it was.
+- The preview covers Daedalus's **managed area**; your manual files outside it are
+  preserved and are not shown as changes.
+- **Phase 1:** Daedalus configures the AI structure; it does not execute agents —
+  the preview shows configuration changes, not agent runs.
+
+See the full chapter — with the preview screen, the confirmation gate, and every
+mode — in
+[`docs/guide/compiling-to-a-backend.md`](../../../../docs/guide/compiling-to-a-backend.md#previewing-and-confirming-changes).

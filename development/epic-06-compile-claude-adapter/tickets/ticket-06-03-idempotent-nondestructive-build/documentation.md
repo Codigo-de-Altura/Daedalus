@@ -47,8 +47,10 @@ Compiled .:
 - **Orphans are reported, never deleted.** Remove the canonical source of an
   artifact and the leftover native file is flagged as an orphan in the summary,
   left untouched. Delete it yourself if you no longer want it.
-- An interactive review-and-confirm step for these changes is planned for a later
-  release (not part of this one).
+- These classifications and the exact content changes can be reviewed artifact by
+  artifact in the
+  [interactive preview](../../../../docs/guide/compiling-to-a-backend.md#previewing-and-confirming-changes)
+  before anything is written.
 
 See the full chapter — with worked re-build summaries and the orphan example — in
 [`docs/guide/compiling-to-a-backend.md`](../../../../docs/guide/compiling-to-a-backend.md#re-running-build-idempotent-and-non-destructive).

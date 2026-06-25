@@ -59,12 +59,64 @@
 
 ## Verdict
 
-**Estado:** _APPROVED_ / _REJECTED_ — _(a completar por Leia tras ejecutar los checks.)_
+**Estado:** **APPROVED** — validated by Leia on 2026-06-25.
+
+All 8 checks pass across three independent evidence paths: (1) the key-driven test
+suite (`go test ./internal/tui/...` — 18 build-preview tests green, exercising the
+exact keys y/enter/n/esc/up/down and every state), (2) real `View()` frames captured
+from a disposable harness driving a fabricated plan (created + modified + unchanged +
+orphan) through the ready/modified-diff/unchanged/written/cancelled/empty/error/
+read-only states, and (3) the CLI wiring run headless against a real `.daedalus/`
+workspace (2 agents + 1 prompt, claude-code backend). Code health is clean:
+`go build ./...`, `go test ./... -count=1`, `go vet ./...` all pass; `gofmt -l internal cmd`
+is empty. The 06-01 contract change (non-TTY `build` no longer writes without `--yes`;
+`TestRunBuildCompilesClaudeArtifacts` updated to `--yes`) is coherent and covered by
+dedicated dry-run / preview / write tests.
+
+Evidence per check:
+- Check 1 — `.claude/` absent before confirmation (TestConfirmWritesToDisk); `--preview`
+  leaves no `.claude/` (CLI, Test-Path=False).
+- Check 2 — all-new plan classifies every artifact `[new]`; CLI preview shows "4 new".
+- Check 3 — empty state renders "No changes — every artifact is already up to date";
+  second `--yes` run is idempotent ("0 created, 0 updated, 4 unchanged").
+- Check 4 — modified artifact shows a readable line diff with `-`/`+` and context, both
+  in the TUI frame and the CLI preview (`- description: …spec/PRD.` / `+ …CHANGED…`).
+- Check 5 — confirm (y/enter) writes; written summary matches the preview (4 created).
+- Check 6 — cancel (n/esc) ends as Cancelled and leaves disk untouched; non-TTY dry-run
+  writes nothing.
+- Check 7 — read-only `--preview` has a nil buildFn (structurally cannot write), gate
+  says "nothing will be written"; CLI `--preview` exits 0 with no `.claude/`.
+- Check 8 — consistent chrome/title, per-backend counts, status badges, contextual help
+  footer reflecting the active state, scroll hint, no dead-ends. Error states are
+  actionable; absent workspace → exit 4 + "run 'daedalus init'"; invalid definition →
+  exit 3 + finding-by-finding message, nothing written.
+
+The 3 `minor` cosmetics found in the first pass were polished by Padmé (presentation
+only, no behavior change) and re-verified by Leia on 2026-06-25 — all three are now
+**RESOLVED**. The full suite stayed green (`go test ./internal/tui/... -count=1` and
+`go test ./... -count=1`), `gofmt -l internal cmd` empty. Re-check evidence (real frame,
+ready state with a modified artifact selected + two orphans):
+
+```
+╭────────────────────────────────────────────────────────╮
+│ claude-code: 1 new, 1 modified, 1 unchanged, 2 orphans │   ← border flush (fix #1)
+╰────────────────────────────────────────────────────────╯
+
+  [new]        .claude/agents/analyst.md
+> [modified]   .claude/agents/coder.md                        ← cursor only on navigable rows
+  [unchanged]  .claude/agents/idle.md
+                                                              ← paths aligned in one column (fix #2)
+Orphans — left untouched · not selectable                     ← separated, subtle, no cursor (fix #3)
+[orphan]     .claude/agents/removed-old.md
+[orphan]     .claude/commands/gone.md
+```
 
 ### Hallazgos
 
-| # | Severidad | Check | Observado | Esperado |
-|---|---|---|---|---|
-| | | | | |
+| # | Severidad | Check | Observado | Esperado | Estado |
+|---|---|---|---|---|---|
+| 1 | minor | 8 | Summary box right border sat one cell short on ANSI-colored count lines. | Border flush regardless of color codes. | **RESOLVED** — `summaryBoxView` normalizes visible width via `lipgloss.Width` before bordering; frame shows the `│` flush on the colored count line. |
+| 2 | minor | 8 | `[orphan]` badge not column-aligned with the fixed-width status badges, shifting its path one column left. | All badges padded to one fixed width so paths align. | **RESOLVED** — `padBadge` pads every label to `badgeWidth=11`; all paths now start in the same column. |
+| 3 | minor | 8 | Orphans in the list were non-navigable with no detail, reading as a possible cursor dead-spot. | Make the orphans' non-interactive nature self-evident. | **RESOLVED** — separate subtle section headed "Orphans — left untouched · not selectable"; no cursor on those rows. |
 
 > Severidad: `blocker` / `major` / `minor`. Un hallazgo por fila. Si `REJECTED`, el orquestador traslada estos hallazgos a `observations.md`.

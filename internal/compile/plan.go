@@ -43,14 +43,28 @@ func (s ArtifactStatus) String() string {
 	}
 }
 
-// PlannedArtifact pairs a produced artifact with the status its write would have.
-// It carries the relative path (slash form, stable across OSes) so a caller can
-// report or diff without recomputing the classification.
+// PlannedArtifact pairs a produced artifact with the status its write would have,
+// plus the two contents a preview needs to render a diff WITHOUT reading disk or
+// recompiling (RF-6.4). It carries the relative path (slash form, stable across
+// OSes) so a caller can report or diff straight from this value.
+//
+// Target and Current are the whole point of the enrichment: the presentation layer
+// (Padmé's TUI) diffs Current → Target itself and never touches the filesystem,
+// keeping the strict presentation/core split the rest of the tui package follows.
 type PlannedArtifact struct {
 	// RelPath is the artifact's repo-relative path in slash form.
 	RelPath string
 	// Status is what writing this artifact would do (created/updated/unchanged).
 	Status ArtifactStatus
+	// Target is the new content the compiler produced for this artifact — what a
+	// build would write. It is always populated.
+	Target string
+	// Current is the content currently on disk at RelPath: empty for a StatusCreated
+	// artifact (the file does not exist yet), and the existing bytes otherwise. For
+	// StatusUnchanged it equals Target; for StatusUpdated it differs. The preview
+	// diffs Current → Target; a caller must use Status (not an empty Current) to
+	// tell "created" from "an existing empty file", since both yield Current == "".
+	Current string
 }
 
 // BackendPlan is the pure, side-effect-free classification of one backend's
@@ -122,11 +136,16 @@ func PlanArtifacts(root string, arts Artifacts) (BackendPlan, error) {
 	plan := BackendPlan{Backend: arts.Backend}
 
 	for _, f := range arts.Files {
-		status, err := classify(root, f)
+		status, current, err := classify(root, f)
 		if err != nil {
 			return BackendPlan{}, err
 		}
-		plan.Artifacts = append(plan.Artifacts, PlannedArtifact{RelPath: f.RelPath, Status: status})
+		plan.Artifacts = append(plan.Artifacts, PlannedArtifact{
+			RelPath: f.RelPath,
+			Status:  status,
+			Target:  f.Content,
+			Current: current,
+		})
 	}
 
 	orphans, err := detectOrphans(root, arts)
@@ -139,21 +158,24 @@ func PlanArtifacts(root string, arts Artifacts) (BackendPlan, error) {
 }
 
 // classify compares one artifact's target content to what is on disk and returns
-// its status. A read error other than "not exist" is surfaced (it is a real I/O
+// its status AND the current on-disk content (empty when the file does not exist),
+// so callers that need the bytes for a diff (PlanArtifacts) do not read the file a
+// second time. A read error other than "not exist" is surfaced (it is a real I/O
 // problem, not a classification outcome).
-func classify(root string, f Artifact) (ArtifactStatus, error) {
+func classify(root string, f Artifact) (status ArtifactStatus, current string, err error) {
 	abs := filepath.Join(root, filepath.FromSlash(f.RelPath))
-	current, err := os.ReadFile(abs)
+	b, err := os.ReadFile(abs)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return StatusCreated, nil
+		return StatusCreated, "", nil
 	case err != nil:
-		return StatusUnchanged, err
+		return StatusUnchanged, "", err
 	}
-	if string(current) == f.Content {
-		return StatusUnchanged, nil
+	current = string(b)
+	if current == f.Content {
+		return StatusUnchanged, current, nil
 	}
-	return StatusUpdated, nil
+	return StatusUpdated, current, nil
 }
 
 // detectOrphans lists files inside the managed directories that the current build

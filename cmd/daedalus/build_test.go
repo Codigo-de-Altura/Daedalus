@@ -74,8 +74,10 @@ func TestRunBuildInvalidDefinition(t *testing.T) {
 }
 
 // TestRunBuildCompilesClaudeArtifacts covers the happy path at the CLI: with a
-// valid workspace the build routes to the Claude Code adapter, writes `.claude/`
-// artifacts, exits 0, and prints a summary naming the backend (REQ-7).
+// valid workspace `build --yes` routes to the Claude Code adapter, writes
+// `.claude/` artifacts, exits 0, and prints a summary naming the backend (REQ-7).
+// --yes is the non-interactive write path (the test runs without a TTY); a plain
+// `build` without a terminal is a dry run (see TestRunBuildNonTTYNoYesIsDryRun).
 func TestRunBuildCompilesClaudeArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	scaffold(t, dir)
@@ -83,7 +85,7 @@ func TestRunBuildCompilesClaudeArtifacts(t *testing.T) {
 		t.Fatalf("agent add failed (%d): %s", code, stderr)
 	}
 
-	code, stdout, stderr := runBuildInDir(dir)
+	code, stdout, stderr := runBuildInDir(dir, "--yes")
 	if code != exitBuildOK {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr)
 	}
@@ -95,6 +97,60 @@ func TestRunBuildCompilesClaudeArtifacts(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".claude", "settings.json")); err != nil {
 		t.Errorf("settings.json not written: %v", err)
+	}
+}
+
+// TestRunBuildNonTTYNoYesIsDryRun covers the RF-6.4 safety decision: a plain
+// `build` with no terminal and no --yes prints the textual diff/plan, exits 0, and
+// writes NOTHING, telling the user how to actually write. The test harness runs
+// without a TTY, so this is the path runBuild takes here.
+func TestRunBuildNonTTYNoYesIsDryRun(t *testing.T) {
+	dir := t.TempDir()
+	scaffold(t, dir)
+	if code, _, stderr := runAgentCmd("add", "analyst", "--path", dir); code != 0 {
+		t.Fatalf("agent add failed (%d): %s", code, stderr)
+	}
+
+	code, stdout, _ := runBuildInDir(dir)
+	if code != exitBuildOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(stdout, "no files written") {
+		t.Errorf("dry-run report should say no files were written; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "pass --yes to write") {
+		t.Errorf("dry-run should tell the user how to write; got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "[new]") {
+		t.Errorf("dry-run should classify the new artifact; got:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude")); !os.IsNotExist(err) {
+		t.Errorf("plain non-TTY build must not write (.claude err=%v)", err)
+	}
+}
+
+// TestRunBuildPreviewNonTTYNeverWrites covers Check-7 for the non-TTY path:
+// `build --preview` prints the diff and writes nothing, without the
+// "pass --yes" notice (an explicit preview is not a withheld write).
+func TestRunBuildPreviewNonTTYNeverWrites(t *testing.T) {
+	dir := t.TempDir()
+	scaffold(t, dir)
+	if code, _, stderr := runAgentCmd("add", "analyst", "--path", dir); code != 0 {
+		t.Fatalf("agent add failed (%d): %s", code, stderr)
+	}
+
+	code, stdout, _ := runBuildInDir(dir, "--preview")
+	if code != exitBuildOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(stdout, "no files written") {
+		t.Errorf("preview should say no files were written; got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "pass --yes to write") {
+		t.Errorf("an explicit --preview should not nag about --yes; got:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude")); !os.IsNotExist(err) {
+		t.Errorf("--preview must not write (.claude err=%v)", err)
 	}
 }
 
