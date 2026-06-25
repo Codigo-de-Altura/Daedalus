@@ -1,0 +1,9 @@
+# Daedalus canonical agent definition.
+# Managed by Daedalus. Keys are ordered and stable for clean diffs.
+# This file is the editable source of truth; the prompt lives in prompt.md.
+id: analyst
+version: "1"
+role: "Requirements analyst: turns a brief into a spec"
+prompt: prompt.md
+parameters:
+  model: default

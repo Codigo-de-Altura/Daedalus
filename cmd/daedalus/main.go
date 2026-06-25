@@ -26,6 +26,7 @@ import (
 	"github.com/Codigo-de-Altura/Daedalus/internal/buildinfo"
 	"github.com/Codigo-de-Altura/Daedalus/internal/catalog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/compile"
+	"github.com/Codigo-de-Altura/Daedalus/internal/conventions"
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
 	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
 	"github.com/Codigo-de-Altura/Daedalus/internal/specs"
@@ -63,6 +64,8 @@ func run(args []string) int {
 			return runTicket(args[1:], os.Stdout, os.Stderr)
 		case "trace":
 			return runTrace(args[1:], os.Stdout, os.Stderr)
+		case "validate":
+			return runValidate(args[1:], os.Stdout, os.Stderr)
 		case "build", "sync":
 			// `sync` is a documented alias of `build` (REQ-1): both compile the
 			// canonical .daedalus/ definition to the configured backend's native format.
@@ -4372,6 +4375,70 @@ func traceRefOrNone(ref string) string {
 	return ref
 }
 
+// runValidate handles `daedalus validate`: it checks the `.daedalus/` workspace
+// against the team conventions (naming, structure, format, traceability — RF-8.3)
+// and reports every violation in deterministic order. It REPORTS, never fixes.
+//
+// Exit code mirrors `trace verify` (the established convention-checking command in
+// this CLI): 0 when there are no hard errors (warnings are advisory and do NOT
+// fail), 1 when there is at least one error-level violation, 2 on a usage/IO
+// error. Keeping the same codes as trace verify means CI scripts treat both
+// checkers uniformly.
+func runValidate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus validate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/ workspace is validated")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus validate [--path .]\n\n"+
+			"Validate the .daedalus/ workspace against the team conventions: kebab-case and\n"+
+			"id patterns (epic-NN-<slug>, ticket-NN-MM-<slug>), the canonical directory\n"+
+			"layout, YAML/Markdown format, and spec -> epic -> ticket traceability. It reports\n"+
+			"violations with their location; it never edits or auto-fixes. Exit 0 if there are\n"+
+			"no errors, 1 if there are, 2 on a usage error.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	report, err := conventions.WorkspaceUnder(*dir).Validate()
+	if err != nil {
+		logger.Error("validate failed", "phase", "scan", "err", err)
+		fmt.Fprintf(stderr, "daedalus: validate failed: %v\n", err)
+		return 2
+	}
+
+	errs, warns := report.Counts()
+	logger.Info("workspace validated", "errors", errs, "warnings", warns, "conformant", report.Conformant())
+
+	if report.Conformant() && warns == 0 {
+		fmt.Fprintln(stdout, "Workspace conforms to the conventions (no violations).")
+		return 0
+	}
+
+	if report.Conformant() {
+		fmt.Fprintf(stdout, "Workspace conforms with %d warning%s (no errors):\n",
+			warns, plural(warns, "", "s"))
+	} else {
+		fmt.Fprintf(stdout, "Workspace has %d convention error%s and %d warning%s:\n",
+			errs, plural(errs, "", "s"), warns, plural(warns, "", "s"))
+	}
+	for _, f := range report.Findings {
+		fmt.Fprintf(stdout, "  - %s\n", f.Error())
+	}
+
+	// Only hard errors affect the exit code; warnings are informational.
+	if report.HasErrors() {
+		return 1
+	}
+	return 0
+}
+
 // writePreview renders, on stdout, the directories and root artifacts a plan
 // would create. It lists nothing for an already-complete workspace so an
 // idempotent re-run produces an explicit "nothing to update" preview.
@@ -4388,6 +4455,9 @@ func writePreview(stdout io.Writer, plan *workspace.Plan) {
 		fmt.Fprintf(stdout, "  + %s%s (directory)\n", filepath.ToSlash(dir), "/")
 	}
 	for _, file := range plan.MissingFiles {
+		fmt.Fprintf(stdout, "  + %s (file)\n", filepath.ToSlash(file))
+	}
+	for _, file := range plan.MissingTrackedFiles {
 		fmt.Fprintf(stdout, "  + %s (file)\n", filepath.ToSlash(file))
 	}
 }

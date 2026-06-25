@@ -21,6 +21,19 @@ Esto incluye:
 - La regla de que el directorio de estado de progreso `.daedalus/.state/` es **git-tracked** (no ignorado), tal como lo marca el PRD §8.2 e `init.md` §4.2.
 - La distinción entre **estado relevante** (siempre versionado) y **artefactos derivados/efímeros** (p. ej. salidas de `build` bajo `.claude/`, caches), que quedan fuera del alcance de este estado canónico.
 
+### Inventario de estado relevante → ruta canónica
+
+Cada categoría de estado relevante mapea a una ruta dentro de `.daedalus/`, según el mapa de `init.md` §4.2 y PRD §8.2. Todas son **git-tracked** (texto YAML/Markdown), sin excepciones.
+
+| Categoría | Ruta en `.daedalus/` | Git-tracked |
+|---|---|---|
+| Manifiesto y guía raíz | `daedalus.yaml`, `init.md` | Sí |
+| Definiciones canónicas (agentes, prompts, workflows) | `agents/`, `prompts/`, `workflows/` | Sí |
+| Backlog SDD (specs, arquitectura, epics, tickets, docs) | `specs/`, `architecture/`, `epics/`, `tickets/`, `docs/` | Sí |
+| Estado de progreso | `.state/` (con `README.md` placeholder rastreado que ancla el directorio en git) | Sí |
+
+> **Nota — canónico vs. derivado/efímero.** Lo anterior es el estado **canónico versionado**. Quedan **fuera** de este estado canónico los artefactos **derivados/efímeros**: la salida de `daedalus build` bajo `.claude/` (formato nativo del backend, recompilable desde `.daedalus/`) y cualquier caché local. No son fuente de verdad y no forman parte de este inventario; su política de idempotencia es de EPIC-6.
+
 ## Requerimientos
 
 1. **Inventario explícito.** El plano enumera las categorías de estado relevante de Daedalus y mapea cada una a una ruta dentro de `.daedalus/`.

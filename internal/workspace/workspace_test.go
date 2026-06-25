@@ -458,6 +458,123 @@ func TestArtifactContentIsByteForByteDeterministic(t *testing.T) {
 	}
 }
 
+// TestStatePlaceholderIsScaffolded covers RF-8.1: the progress-state directory
+// `.daedalus/.state/` is materialized with a tracked placeholder file, so it
+// persists in git instead of vanishing as an empty directory.
+func TestStatePlaceholderIsScaffolded(t *testing.T) {
+	root := fixedNameRoot(t, "demo-project")
+
+	res, err := Create(root)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	statePlaceholder := filepath.Join(root, Name, filepath.FromSlash(StateReadme))
+	info, err := os.Stat(statePlaceholder)
+	if err != nil {
+		t.Fatalf("expected tracked state placeholder %q: %v", StateReadme, err)
+	}
+	if info.IsDir() {
+		t.Errorf("%q is a directory, want a tracked file", StateReadme)
+	}
+	if info.Size() == 0 {
+		t.Errorf("%q is empty; an empty file would not document the directory", StateReadme)
+	}
+
+	// It must be reported as created so user-facing counts are accurate.
+	found := false
+	for _, f := range res.CreatedFiles {
+		if f == StateReadme {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("CreatedFiles %v does not include the state placeholder %q", res.CreatedFiles, StateReadme)
+	}
+
+	// The placeholder must explicitly say the directory is versioned and not
+	// gitignored, so a reader understands why it is committed (acceptance criteria).
+	b, err := os.ReadFile(statePlaceholder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := strings.ToLower(string(b))
+	for _, want := range []string{"git-tracked", "gitignore"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("state placeholder does not mention %q; got:\n%s", want, b)
+		}
+	}
+}
+
+// TestStatePlaceholderIsDeterministic covers RNF-6: the placeholder content is
+// byte-for-byte identical across runs (no timestamps or volatile fields), so it
+// never introduces diff noise.
+func TestStatePlaceholderIsDeterministic(t *testing.T) {
+	read := func() string {
+		root := fixedNameRoot(t, "fixed-name")
+		if _, err := Create(root); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		b, err := os.ReadFile(filepath.Join(root, Name, filepath.FromSlash(StateReadme)))
+		if err != nil {
+			t.Fatalf("read state placeholder: %v", err)
+		}
+		return string(b)
+	}
+	if a, b := read(), read(); a != b {
+		t.Errorf("state placeholder not deterministic:\n--- run 1 ---\n%s\n--- run 2 ---\n%s", a, b)
+	}
+}
+
+// TestStatePlaceholderUpgradeAndNonDestructive verifies the placeholder is added
+// on an upgrade where `.state/` already exists (its parent is not in MissingDirs)
+// and that a manually edited placeholder survives a re-run untouched.
+func TestStatePlaceholderUpgradeAndNonDestructive(t *testing.T) {
+	root := t.TempDir()
+
+	if _, err := Create(root); err != nil {
+		t.Fatal(err)
+	}
+	wsPath := filepath.Join(root, Name)
+	statePlaceholder := filepath.Join(wsPath, filepath.FromSlash(StateReadme))
+
+	// Manual edit must survive verbatim across a re-run (non-destruction).
+	const marker = "MANUAL-STATE-EDIT-456"
+	if err := os.WriteFile(statePlaceholder, []byte(marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(root); err != nil {
+		t.Fatalf("Create (re-run): %v", err)
+	}
+	if b, _ := os.ReadFile(statePlaceholder); string(b) != marker {
+		t.Errorf("manual edit to state placeholder was lost: %q", b)
+	}
+
+	// Now simulate a workspace where `.state/` exists but its placeholder was
+	// deleted: detection must flag only the tracked file (not the dir) and Apply
+	// must recreate it.
+	if err := os.Remove(statePlaceholder); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Detect(root)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if len(plan.MissingDirs) != 0 {
+		t.Errorf("MissingDirs = %v, want none (.state/ still exists)", plan.MissingDirs)
+	}
+	if got := plan.MissingTrackedFiles; len(got) != 1 || got[0] != StateReadme {
+		t.Errorf("MissingTrackedFiles = %v, want [%s]", got, StateReadme)
+	}
+	if _, err := plan.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if _, err := os.Stat(statePlaceholder); err != nil {
+		t.Errorf("state placeholder not recreated on upgrade: %v", err)
+	}
+}
+
 // equal reports whether two string slices are element-wise equal.
 func equal(a, b []string) bool {
 	if len(a) != len(b) {
