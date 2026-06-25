@@ -1,0 +1,13 @@
+phases:
+  - id: spec
+    agent: analyst
+    inputs: [brief]
+    outputs: [spec]
+    gate: spec-gate
+    depends_on: [brief]
+  - id: architecture
+    agent: architect
+    inputs: [spec]
+    outputs: [architecture]
+    gate: architecture-gate
+    depends_on: [spec]
