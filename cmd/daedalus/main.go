@@ -14,16 +14,21 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Codigo-de-Altura/Daedalus/internal/architecture"
+	"github.com/Codigo-de-Altura/Daedalus/internal/backlog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/buildinfo"
 	"github.com/Codigo-de-Altura/Daedalus/internal/catalog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
 	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
+	"github.com/Codigo-de-Altura/Daedalus/internal/specs"
+	"github.com/Codigo-de-Altura/Daedalus/internal/traceability"
 	"github.com/Codigo-de-Altura/Daedalus/internal/tui"
 	"github.com/Codigo-de-Altura/Daedalus/internal/workflows"
 	"github.com/Codigo-de-Altura/Daedalus/internal/workspace"
@@ -47,6 +52,16 @@ func run(args []string) int {
 			return runPrompt(args[1:], os.Stdout, os.Stderr)
 		case "workflow":
 			return runWorkflow(args[1:], os.Stdout, os.Stderr)
+		case "spec":
+			return runSpec(args[1:], os.Stdout, os.Stderr)
+		case "architecture":
+			return runArchitecture(args[1:], os.Stdout, os.Stderr)
+		case "epic":
+			return runEpic(args[1:], os.Stdout, os.Stderr)
+		case "ticket":
+			return runTicket(args[1:], os.Stdout, os.Stderr)
+		case "trace":
+			return runTrace(args[1:], os.Stdout, os.Stderr)
 		default:
 			fmt.Fprintf(os.Stderr, "daedalus: unknown command %q\nrun 'daedalus --help' for usage\n", args[0])
 			return 2
@@ -1985,6 +2000,2185 @@ func writeWorkflowSchemaErrors(w io.Writer, err error) {
 	}
 }
 
+// runSpec handles the `daedalus spec` subcommand, a thin CLI surface over the SDD
+// backlog's brief/spec domain (internal/specs). It dispatches to the operation
+// named by the next argument so the verb set can grow without reshaping run():
+// capture (persist a brief and seed its spec), list, show, edit, remove. It keeps
+// the same conventions as runPrompt/runWorkflow — own usage, exit code 2 for usage
+// errors, logging to stderr — so the CLI feels uniform.
+//
+// Phase 1: none of these operations run the analyst agent (R5/CA5). `capture` only
+// manages the definition — it persists the human's brief and seeds the canonical
+// spec destination, wired (in frontmatter) to the analyst step of the default SDD
+// workflow; the user generates the spec body by running the agent on their backend.
+func runSpec(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, specUsage)
+		return 2
+	}
+
+	switch args[0] {
+	case "capture":
+		return runSpecCapture(args[1:], stdout, stderr)
+	case "list":
+		return runSpecList(args[1:], stdout, stderr)
+	case "show":
+		return runSpecShow(args[1:], stdout, stderr)
+	case "edit":
+		return runSpecEdit(args[1:], stdout, stderr)
+	case "remove":
+		return runSpecRemove(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown spec operation %q\n\n%s", args[0], specUsage)
+		return 2
+	}
+}
+
+// specUsage is the shared help text for the `spec` subcommand, surfaced when no
+// operation (or an unknown one) is given.
+const specUsage = "Usage: daedalus spec <operation> [flags]\n\n" +
+	"Work with the SDD backlog's briefs and specs in .daedalus/specs/.\n" +
+	"Daedalus manages the definition only; it does not run the analyst agent.\n\n" +
+	"Operations:\n" +
+	"  capture <slug> --title <t> [flags]   capture a brief and seed its spec/PRD\n" +
+	"  list                                 list captured briefs (slug, title, has-spec)\n" +
+	"  show <slug> [--brief]                print the spec (or the brief) verbatim\n" +
+	"  edit <slug> [flags]                  edit the materialized spec's title or body\n" +
+	"  remove <slug> [--brief]              delete the spec (or the brief) file\n\n" +
+	"Run 'daedalus spec <operation> --help' for an operation's flags.\n"
+
+// specsRootFor builds the canonical `.daedalus/specs/` directory under dir so a
+// brief/spec lands exactly where init scaffolds the specs/ directory. Built here
+// rather than in the specs package so that package stays free of the
+// workspace-location convention (mirrors promptsRootFor/workflowsRootFor).
+func specsRootFor(dir string) string {
+	return filepath.Join(dir, workspace.Name, specs.SpecsDir)
+}
+
+// runSpecCapture handles `daedalus spec capture <slug> --title <t>`: it captures a
+// brief and seeds its canonical spec destination under .daedalus/specs/. The brief
+// is validated before any write, so an invalid slug/title is rejected with an
+// actionable error and nothing is written. It is non-destructive — an existing brief
+// or spec (e.g. one the user has refined) is preserved, not overwritten (R4/R7) —
+// and --preview reports the files that would be created without writing anything.
+func runSpecCapture(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus spec capture", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/specs/ the brief is captured into")
+	title := fs.String("title", "", "brief title (required)")
+	body := fs.String("body", "", "brief body inline")
+	bodyFile := fs.String("body-file", "", "brief body from a file (takes precedence over --body)")
+	preview := fs.Bool("preview", false, "show the files that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus spec capture <slug> --title <t> [flags]\n\n"+
+			"Capture a brief as <slug>.brief.md and seed its canonical spec destination\n"+
+			"<slug>.md in the target workspace's .daedalus/specs/ directory. The spec is\n"+
+			"wired to the analyst step of the sdd-default workflow and references the brief,\n"+
+			"but Daedalus does NOT run the agent: generate the spec on your backend and\n"+
+			"refine it. Existing files are not overwritten. If both --body-file and --body\n"+
+			"are given, --body-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitSpecSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	// Resolve the body: --body-file wins over --body so a caller can keep a long
+	// brief in a file without it being shadowed by an accidental inline one.
+	bodyText := *body
+	if *bodyFile != "" {
+		b, err := os.ReadFile(*bodyFile)
+		if err != nil {
+			logger.Error("spec capture rejected", "phase", "flags", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return 2
+		}
+		bodyText = string(b)
+	}
+
+	brief := specs.Brief{Slug: slug, Title: *title, Body: bodyText}
+	specsRoot := specsRootFor(*dir)
+
+	// Plan first: validates the brief and renders both files' content without touching
+	// the filesystem, so an invalid brief fails as a usage error before any write or
+	// preview.
+	plan, err := specs.PlanCapture(specsRoot, brief)
+	if err != nil {
+		logger.Error("spec capture rejected", "phase", "plan", "slug", slug, "err", err)
+		if isSpecInvalid(err) {
+			fmt.Fprintf(stderr, "daedalus: brief %q is invalid; it was not captured:\n", slug)
+			writeSpecSchemaErrors(stderr, err)
+		} else {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		}
+		return 2
+	}
+
+	logger.Info("spec capture planned", "slug", plan.Brief.Slug, "brief", plan.BriefPath, "spec", plan.SpecPath)
+
+	if *preview {
+		fmt.Fprintf(stdout, "Preview of capturing brief %q into %s:\n", plan.Brief.Slug, filepath.ToSlash(specsRoot))
+		fmt.Fprintf(stdout, "  + %s (brief)\n", filepath.ToSlash(filepath.Base(plan.BriefPath)))
+		fmt.Fprintf(stdout, "  + %s (spec, seeded; generate with the analyst on your backend)\n",
+			filepath.ToSlash(filepath.Base(plan.SpecPath)))
+		logger.Info("spec capture preview only", "slug", plan.Brief.Slug, "applied", false)
+		return 0
+	}
+
+	res, err := plan.Apply()
+	if err != nil {
+		logger.Error("spec capture failed", "phase", "apply", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: spec capture failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("spec captured",
+		"slug", res.Slug, "brief_created", res.BriefCreated, "spec_created", res.SpecCreated)
+	writeSpecCaptureResult(stdout, res)
+	return 0
+}
+
+// writeSpecCaptureResult reports the outcome of a capture, choosing wording that
+// unambiguously distinguishes a fresh capture from the non-destructive case where
+// the brief and/or its spec already existed and were preserved (R4/R7).
+func writeSpecCaptureResult(stdout io.Writer, res *specs.CaptureResult) {
+	brief := filepath.ToSlash(res.BriefPath)
+	spec := filepath.ToSlash(res.SpecPath)
+	switch {
+	case res.BriefCreated && res.SpecCreated:
+		fmt.Fprintf(stdout, "Captured brief %q at %s and seeded its spec at %s.\n", res.Slug, brief, spec)
+		fmt.Fprintf(stdout, "Generate the spec by running the %q agent on your backend, then refine %s.\n",
+			specs.AnalystAgent, spec)
+	case !res.BriefCreated && !res.SpecCreated:
+		fmt.Fprintf(stdout, "Brief %q and its spec already exist — left intact (nothing overwritten).\n", res.Slug)
+	case res.SpecCreated:
+		// Brief existed, spec was missing and got re-seeded (e.g. it was deleted).
+		fmt.Fprintf(stdout, "Brief %q already existed; re-seeded the missing spec at %s.\n", res.Slug, spec)
+	default:
+		// Spec existed (likely user-refined), brief was missing and got re-created.
+		fmt.Fprintf(stdout, "Spec for %q already existed and was preserved; re-created the missing brief at %s.\n",
+			res.Slug, brief)
+	}
+}
+
+// runSpecList handles `daedalus spec list`: it prints the captured briefs (slug,
+// title, whether a spec is materialized) in deterministic, slug-sorted order.
+func runSpecList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus spec list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/specs/ is listed")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus spec list [--path .]\n\n"+
+			"List the captured briefs (slug, title, and whether a spec is materialized).\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	entries, err := specs.List(specsRootFor(*dir))
+	if err != nil {
+		logger.Error("spec list failed", "phase", "list", "err", err)
+		fmt.Fprintf(stderr, "daedalus: spec list failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("specs listed", "briefs", len(entries))
+	fmt.Fprintf(stdout, "Briefs (%d):\n", len(entries))
+	for _, e := range entries {
+		specState := "no-spec"
+		if e.HasSpec {
+			specState = "spec"
+		}
+		fmt.Fprintf(stdout, "  %s\t%s\t%s\n", e.Slug, specState, e.Title)
+	}
+	return 0
+}
+
+// runSpecShow handles `daedalus spec show <slug> [--brief]`: it prints the spec's
+// file content verbatim (or the brief's, with --brief) so the user sees exactly what
+// is persisted.
+func runSpecShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus spec show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/specs/ holds the artifact")
+	brief := fs.Bool("brief", false, "show the brief (<slug>.brief.md) instead of the spec (<slug>.md)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus spec show <slug> [--brief] [--path .]\n\n"+
+			"Print the spec's file content verbatim, or the brief's with --brief.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitSpecSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !specs.IsKebabCase(slug) {
+		fmt.Fprintf(stderr, "daedalus: spec slug %q is not valid kebab-case\n", slug)
+		return 2
+	}
+
+	name := slug + specs.FileExt
+	if *brief {
+		name = slug + specs.BriefExt
+	}
+	path := filepath.Join(specsRootFor(*dir), name)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Error("spec show rejected", "phase", "read", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %s for %q not found\n", artifactWord(*brief), slug)
+			return 2
+		}
+		logger.Error("spec show failed", "phase", "read", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: spec show failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("spec shown", "slug", slug, "brief", *brief)
+	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// artifactWord names the artifact a flag selects, for human-readable messages.
+func artifactWord(brief bool) string {
+	if brief {
+		return "brief"
+	}
+	return "spec"
+}
+
+// runSpecEdit handles `daedalus spec edit <slug>`: it edits the materialized spec's
+// title and/or body in place. The edit is validated before any write, so an edit
+// that would leave the spec invalid (e.g. an empty title) is rejected with an
+// actionable error and the existing file is left intact (R4). The brief reference
+// and provenance are not editable. Writes are atomic. The brief itself is not
+// editable here: it is the human's authored input, refined outside Daedalus.
+func runSpecEdit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus spec edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/specs/ holds the spec")
+	title := fs.String("title", "", "set the spec's title")
+	body := fs.String("body", "", "set the spec's body inline")
+	bodyFile := fs.String("body-file", "", "set the spec's body from a file (takes precedence over --body)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus spec edit <slug> [flags]\n\n"+
+			"Edit the materialized spec's title or body. At least one edit flag is required.\n"+
+			"The brief reference and provenance are preserved. The edit is validated before\n"+
+			"writing; an invalid edit is rejected and the existing file is left intact. If\n"+
+			"both --body-file and --body are given, --body-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitSpecSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	spec, err := buildSpecEditSpec(fs, *title, *body, *bodyFile)
+	if err != nil {
+		logger.Error("spec edit rejected", "phase", "flags", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return 2
+	}
+	if spec.IsEmpty() {
+		fmt.Fprint(stderr, "daedalus: spec edit requires at least one edit flag (--title, --body, --body-file)\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	specsRoot := specsRootFor(*dir)
+
+	edited, err := specs.EditSpecArtifact(specsRoot, slug, spec)
+	if err != nil {
+		switch {
+		case errors.Is(err, specs.ErrSpecNotFound):
+			logger.Error("spec edit rejected", "phase", "load", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			fmt.Fprint(stderr, "the spec must already exist; capture its brief first\n")
+			return 2
+		case errors.Is(err, specs.ErrMalformed):
+			logger.Error("spec edit failed", "phase", "load", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 1
+		case isSpecInvalid(err):
+			logger.Error("spec edit rejected", "phase", "validate", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: spec %q is invalid; the edit was not applied:\n", slug)
+			writeSpecSchemaErrors(stderr, err)
+			return 2
+		default:
+			logger.Error("spec edit failed", "phase", "write", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: spec edit failed: %v\n", err)
+			return 1
+		}
+	}
+
+	logger.Info("spec edited", "slug", edited.Slug)
+	fmt.Fprintf(stdout, "Edited spec %q at %s.\n",
+		edited.Slug, filepath.ToSlash(filepath.Join(specsRoot, edited.Slug+specs.FileExt)))
+	return 0
+}
+
+// buildSpecEditSpec assembles a specs.SpecEditSpec from the parsed edit flags. It
+// uses fs.Visit to learn which flags the user actually passed, so an explicit empty
+// value (e.g. --title "") is recorded as a (rejectable) change rather than confused
+// with the flag's default. --body-file takes precedence over --body.
+func buildSpecEditSpec(fs *flag.FlagSet, title, body, bodyFile string) (specs.SpecEditSpec, error) {
+	var spec specs.SpecEditSpec
+
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	if set["title"] {
+		spec.SetTitle = true
+		spec.Title = title
+	}
+	switch {
+	case set["body-file"]:
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			return specs.SpecEditSpec{}, fmt.Errorf("reading --body-file: %w", err)
+		}
+		spec.SetBody = true
+		spec.Body = string(b)
+	case set["body"]:
+		spec.SetBody = true
+		spec.Body = body
+	}
+
+	return spec, nil
+}
+
+// runSpecRemove handles `daedalus spec remove <slug> [--brief]`: it deletes the
+// spec's file (or the brief's, with --brief) and nothing else. An absent artifact is
+// reported as an explicit error. Removing the spec leaves the brief intact and vice
+// versa, so the user can drop and re-seed one half of the pair deliberately.
+func runSpecRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus spec remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/specs/ holds the artifact")
+	brief := fs.Bool("brief", false, "remove the brief (<slug>.brief.md) instead of the spec (<slug>.md)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus spec remove <slug> [--brief] [--path .]\n\n"+
+			"Delete the spec's file from the workspace, or the brief's with --brief. Only\n"+
+			"that one file is removed; the other half of the pair is left intact.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitSpecSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !specs.IsKebabCase(slug) {
+		fmt.Fprintf(stderr, "daedalus: spec slug %q is not valid kebab-case\n", slug)
+		return 2
+	}
+
+	specsRoot := specsRootFor(*dir)
+	name := slug + specs.FileExt
+	if *brief {
+		name = slug + specs.BriefExt
+	}
+	path := filepath.Join(specsRoot, name)
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Error("spec remove rejected", "phase", "remove", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %s for %q not found\n", artifactWord(*brief), slug)
+			return 2
+		}
+		logger.Error("spec remove failed", "phase", "remove", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: spec remove failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("spec artifact removed", "slug", slug, "brief", *brief)
+	fmt.Fprintf(stdout, "Removed %s %q from %s.\n", artifactWord(*brief), slug, filepath.ToSlash(path))
+	return 0
+}
+
+// splitSpecSlug extracts the single positional spec slug from an argument list,
+// returning it plus the remaining (flag) tokens. It mirrors splitPromptID but names
+// a "spec slug" in its errors so the `spec` subcommand's usage messages read
+// correctly. Exactly one positional is required; a `--help`/`-h` token is allowed
+// without a slug so the caller's parser can show usage.
+func splitSpecSlug(args []string) (slug string, flags []string, err error) {
+	positionals, flags := splitPositionals(args)
+	for _, f := range flags {
+		if f == "-h" || f == "--help" {
+			return "", flags, nil
+		}
+	}
+	switch len(positionals) {
+	case 1:
+		return positionals[0], flags, nil
+	case 0:
+		return "", flags, errors.New("this operation requires exactly one spec slug")
+	default:
+		return "", flags, fmt.Errorf("this operation requires exactly one spec slug, got %d", len(positionals))
+	}
+}
+
+// isSpecInvalid reports whether err is (or wraps) a *specs.ValidationError — the
+// rich error the specs flows return from their pre-write gates — so the CLI detects
+// it structurally with errors.As rather than matching a message prefix.
+func isSpecInvalid(err error) bool {
+	var ve *specs.ValidationError
+	return errors.As(err, &ve)
+}
+
+// writeSpecSchemaErrors renders a specs validation failure as actionable lines, one
+// finding per line (field: observed / expected), so the user can fix every problem
+// in one pass. It falls back to the plain error text if err is not a
+// *specs.ValidationError, so it is safe to call on any error.
+func writeSpecSchemaErrors(w io.Writer, err error) {
+	var ve *specs.ValidationError
+	if !errors.As(err, &ve) {
+		fmt.Fprintf(w, "  - %v\n", err)
+		return
+	}
+	for _, se := range ve.Errors {
+		fmt.Fprintf(w, "  - %s: observed %s; expected %s\n", se.Field, se.Observed, se.Expected)
+	}
+}
+
+// runArchitecture handles the `daedalus architecture` subcommand, a thin CLI surface
+// over the SDD backlog's architecture-document domain (internal/architecture). It
+// dispatches to the operation named by the next argument so the verb set can grow
+// without reshaping run(): create, list, show, edit, remove. It keeps the same
+// conventions as runSpec/runWorkflow — own usage, exit code 2 for usage errors,
+// logging to stderr — so the CLI feels uniform.
+//
+// Phase 1: none of these operations run the architect agent (R5/CA5). `create` only
+// manages the definition — it persists a document and, when linked, wires it (in
+// frontmatter) to the architect step of the default SDD workflow; the user generates
+// the document body by running the agent on their backend.
+func runArchitecture(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, architectureUsage)
+		return 2
+	}
+
+	switch args[0] {
+	case "create":
+		return runArchitectureCreate(args[1:], stdout, stderr)
+	case "list":
+		return runArchitectureList(args[1:], stdout, stderr)
+	case "show":
+		return runArchitectureShow(args[1:], stdout, stderr)
+	case "edit":
+		return runArchitectureEdit(args[1:], stdout, stderr)
+	case "remove":
+		return runArchitectureRemove(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown architecture operation %q\n\n%s", args[0], architectureUsage)
+		return 2
+	}
+}
+
+// architectureUsage is the shared help text for the `architecture` subcommand,
+// surfaced when no operation (or an unknown one) is given.
+const architectureUsage = "Usage: daedalus architecture <operation> [flags]\n\n" +
+	"Work with the SDD backlog's architecture documents in .daedalus/architecture/.\n" +
+	"Daedalus manages the definition only; it does not run the architect agent.\n\n" +
+	"Operations:\n" +
+	"  create <slug> --title <t> [--spec <s>] [flags]   create an architecture document\n" +
+	"  list                                             list documents (slug, spec, title)\n" +
+	"  show <slug>                                      print a document verbatim (raw)\n" +
+	"  edit <slug> [flags]                              edit a document's title, spec or body\n" +
+	"  remove <slug>                                    delete a document's file\n\n" +
+	"Run 'daedalus architecture <operation> --help' for an operation's flags.\n"
+
+// architectureRootFor builds the canonical `.daedalus/architecture/` directory under
+// dir so a document lands exactly where init scaffolds the architecture/ directory.
+// Built here rather than in the architecture package so that package stays free of the
+// workspace-location convention (mirrors promptsRootFor/specsRootFor).
+func architectureRootFor(dir string) string {
+	return filepath.Join(dir, workspace.Name, architecture.ArchitectureDir)
+}
+
+// specExistsFor reports whether the referenced spec slug has a materialized
+// `<slug>.md` spec under the workspace's specs directory. It is the friendly,
+// filesystem-aware existence check the architecture store deliberately does NOT do
+// (the store stays a pure model->bytes transform and must not couple to internal/
+// specs): the CLI knows where specs live, so it resolves the link here. This mirrors
+// how runWorkflowValidate resolves agent existence at the CLI layer rather than in the
+// core. A missing spec is rejected at create time as an actionable usage error,
+// coherent with the validation's precondition that a spec exists to link; full
+// spec->architecture->... traceability is ticket 05-04.
+func specExistsFor(dir, specSlug string) bool {
+	path := filepath.Join(dir, workspace.Name, specs.SpecsDir, specSlug+specs.FileExt)
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// runArchitectureCreate handles `daedalus architecture create <slug> --title <t>
+// [--spec <spec-slug>]`: it creates an architecture document under
+// .daedalus/architecture/. The document is validated before any write, so an invalid
+// slug/title is rejected with an actionable error and nothing is written. The --spec
+// link is OPTIONAL (R3); when given, the referenced spec must already exist (a
+// friendly check) and is recorded as the spec -> architecture trace. It is
+// non-destructive — an existing document (e.g. one the user refined) is preserved, not
+// overwritten (R4/R7) — and --preview reports the file that would be created without
+// writing anything.
+func runArchitectureCreate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus architecture create", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/architecture/ the document is added to")
+	title := fs.String("title", "", "document title (required)")
+	specSlug := fs.String("spec", "", "slug of the originating spec to link (optional; must exist in .daedalus/specs/)")
+	body := fs.String("body", "", "document body inline")
+	bodyFile := fs.String("body-file", "", "document body from a file (takes precedence over --body)")
+	preview := fs.Bool("preview", false, "show the file that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus architecture create <slug> --title <t> [--spec <spec-slug>] [flags]\n\n"+
+			"Create an architecture document as <slug>.md in the target workspace's\n"+
+			".daedalus/architecture/ directory. With --spec, link it to an existing spec as\n"+
+			"its origin (the spec -> architecture trace), wired to the architect step of the\n"+
+			"sdd-default workflow; Daedalus does NOT run the agent. Existing documents are not\n"+
+			"overwritten. If both --body-file and --body are given, --body-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitArchitectureSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	// Resolve the body: --body-file wins over --body so a caller can keep a long
+	// document in a file without it being shadowed by an accidental inline one.
+	bodyText := *body
+	if *bodyFile != "" {
+		b, err := os.ReadFile(*bodyFile)
+		if err != nil {
+			logger.Error("architecture create rejected", "phase", "flags", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return 2
+		}
+		bodyText = string(b)
+	}
+
+	// Friendly spec-link resolution: a non-empty --spec must reference an existing
+	// spec. We translate the spec slug to its file reference (<spec-slug>.md), which is
+	// exactly what the frontmatter records as the trace.
+	var specRef string
+	if strings.TrimSpace(*specSlug) != "" {
+		if !specs.IsKebabCase(*specSlug) {
+			fmt.Fprintf(stderr, "daedalus: --spec %q is not valid kebab-case\n", *specSlug)
+			return 2
+		}
+		if !specExistsFor(*dir, *specSlug) {
+			logger.Error("architecture create rejected", "phase", "spec-link", "spec", *specSlug)
+			fmt.Fprintf(stderr, "daedalus: spec %q not found in %s; capture it first or omit --spec\n",
+				*specSlug, filepath.ToSlash(filepath.Join(workspace.Name, specs.SpecsDir)))
+			return 2
+		}
+		specRef = *specSlug + specs.FileExt
+	}
+
+	doc := architecture.Document{Slug: slug, Title: *title, SpecRef: specRef, Body: bodyText}
+	archRoot := architectureRootFor(*dir)
+
+	// Plan first: validates the document and renders the content without touching the
+	// filesystem, so an invalid document fails as a usage error before any write or
+	// preview.
+	plan, err := architecture.PlanCreate(archRoot, doc)
+	if err != nil {
+		logger.Error("architecture create rejected", "phase", "plan", "slug", slug, "err", err)
+		if isArchitectureInvalid(err) {
+			fmt.Fprintf(stderr, "daedalus: architecture document %q is invalid; it was not created:\n", slug)
+			writeArchitectureSchemaErrors(stderr, err)
+		} else {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		}
+		return 2
+	}
+
+	logger.Info("architecture create planned", "slug", plan.Document.Slug, "spec", plan.Document.SpecRef, "path", plan.Path)
+
+	if *preview {
+		fmt.Fprintf(stdout, "Preview of creating architecture document %q at %s:\n",
+			plan.Document.Slug, filepath.ToSlash(plan.Path))
+		fmt.Fprint(stdout, plan.Content)
+		logger.Info("architecture create preview only", "slug", plan.Document.Slug, "applied", false)
+		return 0
+	}
+
+	if err := plan.Apply(); err != nil {
+		if errors.Is(err, architecture.ErrDocumentExists) {
+			logger.Error("architecture create rejected", "phase", "apply", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v — not overwritten\n", err)
+			return 2
+		}
+		logger.Error("architecture create failed", "phase", "apply", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: architecture create failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("architecture document created", "slug", plan.Document.Slug, "spec", plan.Document.SpecRef)
+	fmt.Fprintf(stdout, "Created architecture document %q at %s.\n",
+		plan.Document.Slug, filepath.ToSlash(plan.Path))
+	if plan.Document.SpecRef != "" {
+		fmt.Fprintf(stdout, "Linked to spec %s. Generate the architecture by running the %q agent on your backend, then refine it.\n",
+			plan.Document.SpecRef, architecture.ArchitectAgent)
+	} else {
+		fmt.Fprintf(stdout, "Generate the architecture by running the %q agent on your backend, then refine it.\n",
+			architecture.ArchitectAgent)
+	}
+	return 0
+}
+
+// runArchitectureList handles `daedalus architecture list`: it prints the architecture
+// documents (slug, spec link, title) in deterministic, slug-sorted order.
+func runArchitectureList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus architecture list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/architecture/ is listed")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus architecture list [--path .]\n\n"+
+			"List the architecture documents (slug, linked spec or '-', title).\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	entries, err := architecture.List(architectureRootFor(*dir))
+	if err != nil {
+		logger.Error("architecture list failed", "phase", "list", "err", err)
+		fmt.Fprintf(stderr, "daedalus: architecture list failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("architecture documents listed", "documents", len(entries))
+	fmt.Fprintf(stdout, "Architecture documents (%d):\n", len(entries))
+	for _, e := range entries {
+		specRef := e.SpecRef
+		if specRef == "" {
+			specRef = "-"
+		}
+		fmt.Fprintf(stdout, "  %s\t%s\t%s\n", e.Slug, specRef, e.Title)
+	}
+	return 0
+}
+
+// runArchitectureShow handles `daedalus architecture show <slug>`: it prints the
+// document's file content verbatim to stdout, so the user sees exactly what is
+// persisted.
+func runArchitectureShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus architecture show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/architecture/ holds the document")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus architecture show <slug> [--path .]\n\n"+
+			"Print the architecture document's file content verbatim.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitArchitectureSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	if !architecture.IsKebabCase(slug) {
+		fmt.Fprintf(stderr, "daedalus: architecture slug %q is not valid kebab-case\n", slug)
+		return 2
+	}
+
+	path := filepath.Join(architectureRootFor(*dir), slug+architecture.FileExt)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Error("architecture show rejected", "phase", "read", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: architecture document %q not found\n", slug)
+			return 2
+		}
+		logger.Error("architecture show failed", "phase", "read", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: architecture show failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("architecture document shown", "slug", slug)
+	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// runArchitectureEdit handles `daedalus architecture edit <slug>`: it edits a
+// document's title, spec link and/or body in place. The edit is validated before any
+// write, so an edit that would leave the document invalid (e.g. an empty title) is
+// rejected with an actionable error and the existing file is left intact (R4). A
+// non-empty --spec must reference an existing spec (friendly check); --spec "" clears
+// the link. Writes are atomic.
+func runArchitectureEdit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus architecture edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/architecture/ holds the document")
+	title := fs.String("title", "", "set the document's title")
+	specSlug := fs.String("spec", "", "set the originating spec link by slug (empty clears the link)")
+	body := fs.String("body", "", "set the document's body inline")
+	bodyFile := fs.String("body-file", "", "set the document's body from a file (takes precedence over --body)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus architecture edit <slug> [flags]\n\n"+
+			"Edit an architecture document's title, spec link or body. At least one edit flag\n"+
+			"is required. A non-empty --spec must reference an existing spec; --spec \"\" clears\n"+
+			"the link. The edit is validated before writing; an invalid edit is rejected and\n"+
+			"the existing file is left intact. If both --body-file and --body are given,\n"+
+			"--body-file wins.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitArchitectureSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	spec, err := buildArchitectureEditSpec(fs, *dir, *title, *specSlug, *body, *bodyFile, stderr)
+	if err != nil {
+		// buildArchitectureEditSpec already reported the specific reason to stderr.
+		logger.Error("architecture edit rejected", "phase", "flags", "slug", slug, "err", err)
+		return 2
+	}
+	if spec.IsEmpty() {
+		fmt.Fprint(stderr, "daedalus: architecture edit requires at least one edit flag "+
+			"(--title, --spec, --body, --body-file)\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	archRoot := architectureRootFor(*dir)
+
+	edited, err := architecture.Edit(archRoot, slug, spec)
+	if err != nil {
+		switch {
+		case errors.Is(err, architecture.ErrDocumentNotFound):
+			logger.Error("architecture edit rejected", "phase", "load", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			fmt.Fprint(stderr, "the document must already exist; create it first\n")
+			return 2
+		case errors.Is(err, architecture.ErrMalformed):
+			logger.Error("architecture edit failed", "phase", "load", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 1
+		case isArchitectureInvalid(err):
+			logger.Error("architecture edit rejected", "phase", "validate", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: architecture document %q is invalid; the edit was not applied:\n", slug)
+			writeArchitectureSchemaErrors(stderr, err)
+			return 2
+		default:
+			logger.Error("architecture edit failed", "phase", "write", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: architecture edit failed: %v\n", err)
+			return 1
+		}
+	}
+
+	logger.Info("architecture document edited", "slug", edited.Slug, "spec", edited.SpecRef)
+	fmt.Fprintf(stdout, "Edited architecture document %q at %s.\n",
+		edited.Slug, filepath.ToSlash(filepath.Join(archRoot, edited.Slug+architecture.FileExt)))
+	return 0
+}
+
+// buildArchitectureEditSpec assembles an architecture.EditSpec from the parsed edit
+// flags. It uses fs.Visit to learn which flags the user actually passed, so an
+// explicit empty value (e.g. --title "" or --spec "") is recorded as a deliberate
+// change rather than confused with the flag's default. --body-file takes precedence
+// over --body. A non-empty --spec is resolved to its file reference and verified to
+// exist (friendly check); on any flag-level error it reports to stderr and returns an
+// error so the caller exits 2.
+func buildArchitectureEditSpec(fs *flag.FlagSet, dir, title, specSlug, body, bodyFile string, stderr io.Writer) (architecture.EditSpec, error) {
+	var spec architecture.EditSpec
+
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	if set["title"] {
+		spec.SetTitle = true
+		spec.Title = title
+	}
+	if set["spec"] {
+		spec.SetSpec = true
+		// An empty --spec clears the link; a non-empty one must reference an existing
+		// spec and is stored as its file reference (<slug>.md).
+		if strings.TrimSpace(specSlug) == "" {
+			spec.Spec = ""
+		} else {
+			if !specs.IsKebabCase(specSlug) {
+				fmt.Fprintf(stderr, "daedalus: --spec %q is not valid kebab-case\n", specSlug)
+				return architecture.EditSpec{}, fmt.Errorf("invalid spec slug")
+			}
+			if !specExistsFor(dir, specSlug) {
+				fmt.Fprintf(stderr, "daedalus: spec %q not found in %s; capture it first or pass --spec \"\" to clear the link\n",
+					specSlug, filepath.ToSlash(filepath.Join(workspace.Name, specs.SpecsDir)))
+				return architecture.EditSpec{}, fmt.Errorf("spec not found")
+			}
+			spec.Spec = specSlug + specs.FileExt
+		}
+	}
+	switch {
+	case set["body-file"]:
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return architecture.EditSpec{}, err
+		}
+		spec.SetBody = true
+		spec.Body = string(b)
+	case set["body"]:
+		spec.SetBody = true
+		spec.Body = body
+	}
+
+	return spec, nil
+}
+
+// runArchitectureRemove handles `daedalus architecture remove <slug>`: it deletes the
+// document's file and nothing else. An absent document is reported as an explicit
+// error.
+func runArchitectureRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus architecture remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/architecture/ holds the document")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus architecture remove <slug> [--path .]\n\n"+
+			"Delete an architecture document's file from the workspace. Only that file is\n"+
+			"removed.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	slug, flags, err := splitArchitectureSlug(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	archRoot := architectureRootFor(*dir)
+
+	if err := architecture.Remove(archRoot, slug); err != nil {
+		if errors.Is(err, architecture.ErrDocumentNotFound) || !architecture.IsKebabCase(slug) {
+			logger.Error("architecture remove rejected", "phase", "remove", "slug", slug, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		}
+		logger.Error("architecture remove failed", "phase", "remove", "slug", slug, "err", err)
+		fmt.Fprintf(stderr, "daedalus: architecture remove failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("architecture document removed", "slug", slug)
+	fmt.Fprintf(stdout, "Removed architecture document %q from %s.\n",
+		slug, filepath.ToSlash(filepath.Join(archRoot, slug+architecture.FileExt)))
+	return 0
+}
+
+// splitArchitectureSlug extracts the single positional architecture slug from an
+// argument list, returning it plus the remaining (flag) tokens. It mirrors
+// splitSpecSlug but names an "architecture slug" in its errors so the subcommand's
+// usage messages read correctly. Exactly one positional is required; a `--help`/`-h`
+// token is allowed without a slug so the caller's parser can show usage.
+func splitArchitectureSlug(args []string) (slug string, flags []string, err error) {
+	positionals, flags := splitPositionals(args)
+	for _, f := range flags {
+		if f == "-h" || f == "--help" {
+			return "", flags, nil
+		}
+	}
+	switch len(positionals) {
+	case 1:
+		return positionals[0], flags, nil
+	case 0:
+		return "", flags, errors.New("this operation requires exactly one architecture slug")
+	default:
+		return "", flags, fmt.Errorf("this operation requires exactly one architecture slug, got %d", len(positionals))
+	}
+}
+
+// isArchitectureInvalid reports whether err is (or wraps) a
+// *architecture.ValidationError — the rich error the architecture flows return from
+// their pre-write gates — so the CLI detects it structurally with errors.As rather
+// than matching a message prefix.
+func isArchitectureInvalid(err error) bool {
+	var ve *architecture.ValidationError
+	return errors.As(err, &ve)
+}
+
+// writeArchitectureSchemaErrors renders an architecture validation failure as
+// actionable lines, one finding per line (field: observed / expected), so the user can
+// fix every problem in one pass. It falls back to the plain error text if err is not a
+// *architecture.ValidationError, so it is safe to call on any error.
+func writeArchitectureSchemaErrors(w io.Writer, err error) {
+	var ve *architecture.ValidationError
+	if !errors.As(err, &ve) {
+		fmt.Fprintf(w, "  - %v\n", err)
+		return
+	}
+	for _, se := range ve.Errors {
+		fmt.Fprintf(w, "  - %s: observed %s; expected %s\n", se.Field, se.Observed, se.Expected)
+	}
+}
+
+// epicsRootFor builds the canonical `.daedalus/epics/` directory under dir, which roots
+// the nested epic/ticket tree. Built here rather than in the backlog package so that
+// package stays free of the workspace-location convention (mirrors the sibling roots).
+func epicsRootFor(dir string) string {
+	return filepath.Join(dir, workspace.Name, backlog.EpicsDir)
+}
+
+// --- epic subcommand ---
+
+// runEpic handles the `daedalus epic` subcommand, a thin CLI surface over the backlog's
+// epic operations (internal/backlog). It dispatches to create/list/show/edit/remove,
+// keeping the same conventions as the sibling subcommands (own usage, exit code 2 for
+// usage errors, logging to stderr). Phase 1: none of these run the planner (R7/CA7).
+func runEpic(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, epicUsage)
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return runEpicCreate(args[1:], stdout, stderr)
+	case "list":
+		return runEpicList(args[1:], stdout, stderr)
+	case "show":
+		return runEpicShow(args[1:], stdout, stderr)
+	case "edit":
+		return runEpicEdit(args[1:], stdout, stderr)
+	case "remove":
+		return runEpicRemove(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown epic operation %q\n\n%s", args[0], epicUsage)
+		return 2
+	}
+}
+
+const epicUsage = "Usage: daedalus epic <operation> [flags]\n\n" +
+	"Work with the SDD backlog's epics in .daedalus/epics/.\n" +
+	"Daedalus manages the definition only; it does not run the planner agent.\n\n" +
+	"Operations:\n" +
+	"  create <NN> <slug> --title <t> [flags]   create an epic folder epic-NN-<slug>\n" +
+	"  list                                     list epics (id, status, priority, title)\n" +
+	"  show <epic-id>                           print an epic's epic.md verbatim\n" +
+	"  edit <epic-id> [flags]                   edit an epic's metadata or body\n" +
+	"  remove <epic-id>                         delete an epic folder (and its tickets)\n\n" +
+	"Run 'daedalus epic <operation> --help' for an operation's flags.\n"
+
+// runEpicCreate handles `daedalus epic create <NN> <slug> --title <t>`. Numbering is
+// explicit and deterministic: the user supplies NN and the slug, which compose the
+// canonical id `epic-NN-<slug>` (no auto-increment, no hidden state). Metadata flags set
+// status/priority/links/dependencies. Optional --spec/--architecture links are verified
+// to exist (friendly check, CLI-layer) before recording. Non-destructive; --preview
+// shows the file without writing.
+func runEpicCreate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus epic create", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ the epic is added to")
+	title := fs.String("title", "", "epic title (required)")
+	status := fs.String("status", "", "status: "+joinBacklogStatuses()+" (default: "+string(backlog.DefaultStatus)+")")
+	priority := fs.String("priority", "", "priority: "+joinBacklogPriorities()+" (default: "+string(backlog.DefaultPriority)+")")
+	specSlug := fs.String("spec", "", "originating spec slug to link (optional; must exist)")
+	archSlug := fs.String("architecture", "", "originating architecture slug to link (optional; must exist)")
+	dependsOn := fs.String("depends-on", "", "comma-separated dependency ids (optional)")
+	body := fs.String("body", "", "epic body inline")
+	bodyFile := fs.String("body-file", "", "epic body from a file (takes precedence over --body)")
+	preview := fs.Bool("preview", false, "show the file that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus epic create <NN> <slug> --title <t> [flags]\n\n"+
+			"Create an epic as the folder epic-NN-<slug>/ with epic.md in the target\n"+
+			"workspace's .daedalus/epics/ directory. NN is the epic number and <slug> is\n"+
+			"kebab-case. Daedalus does NOT run the planner. Existing epics are not\n"+
+			"overwritten.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	positionals, flags := splitPositionals(args)
+	if hasHelp(flags) {
+		fs.Usage()
+		return 0
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if len(positionals) != 2 {
+		fmt.Fprint(stderr, "daedalus: epic create requires exactly a number and a slug\n\n")
+		fs.Usage()
+		return 2
+	}
+	number, slug := positionals[0], positionals[1]
+
+	logger := logging.New(stderr)
+
+	bodyText, code := resolveBody(*body, *bodyFile, stderr, logger, "epic create")
+	if code != 0 {
+		return code
+	}
+
+	// Resolve optional origin links by slug, verifying existence (friendly CLI check).
+	specRef, code := resolveSpecLink(*dir, *specSlug, stderr)
+	if code != 0 {
+		return code
+	}
+	archRef, code := resolveArchitectureLink(*dir, *archSlug, stderr)
+	if code != 0 {
+		return code
+	}
+
+	epic := backlog.Epic{
+		ID:              backlog.EpicID(number, slug),
+		Title:           *title,
+		Status:          backlog.Status(*status),
+		Priority:        backlog.Priority(*priority),
+		SpecRef:         specRef,
+		ArchitectureRef: archRef,
+		DependsOn:       splitList(*dependsOn),
+		Body:            bodyText,
+	}
+	epicsRoot := epicsRootFor(*dir)
+
+	plan, err := backlog.PlanCreateEpic(epicsRoot, epic)
+	if err != nil {
+		logger.Error("epic create rejected", "phase", "plan", "id", epic.ID, "err", err)
+		if isBacklogInvalid(err) {
+			fmt.Fprintf(stderr, "daedalus: epic %q is invalid; it was not created:\n", epic.ID)
+			writeBacklogSchemaErrors(stderr, err)
+		} else {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		}
+		return 2
+	}
+
+	logger.Info("epic create planned", "id", plan.Epic.ID, "path", plan.Path)
+
+	if *preview {
+		fmt.Fprintf(stdout, "Preview of creating epic %q at %s:\n", plan.Epic.ID, filepath.ToSlash(plan.Path))
+		fmt.Fprint(stdout, plan.Content)
+		return 0
+	}
+
+	if err := plan.Apply(); err != nil {
+		if errors.Is(err, backlog.ErrEpicExists) {
+			logger.Error("epic create rejected", "phase", "apply", "id", epic.ID, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v — not overwritten\n", err)
+			return 2
+		}
+		logger.Error("epic create failed", "phase", "apply", "id", epic.ID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: epic create failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("epic created", "id", plan.Epic.ID)
+	fmt.Fprintf(stdout, "Created epic %q at %s.\n", plan.Epic.ID, filepath.ToSlash(plan.Path))
+	return 0
+}
+
+// runEpicList handles `daedalus epic list`.
+func runEpicList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus epic list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ is listed")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus epic list [--path .]\n\n"+
+			"List the epics (id, status, priority, title).\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	entries, err := backlog.ListEpics(epicsRootFor(*dir))
+	if err != nil {
+		logger.Error("epic list failed", "phase", "list", "err", err)
+		fmt.Fprintf(stderr, "daedalus: epic list failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("epics listed", "epics", len(entries))
+	fmt.Fprintf(stdout, "Epics (%d):\n", len(entries))
+	for _, e := range entries {
+		fmt.Fprintf(stdout, "  %s\t%s\t%s\t%s\n", e.ID, e.Status, e.Priority, e.Title)
+	}
+	return 0
+}
+
+// runEpicShow handles `daedalus epic show <epic-id>`.
+func runEpicShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus epic show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the epic")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus epic show <epic-id> [--path .]\n\n"+
+			"Print the epic's epic.md content verbatim.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitSinglePositional(args, "epic id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	if !backlog.IsEpicID(id) {
+		fmt.Fprintf(stderr, "daedalus: epic id %q is not a valid epic-NN-<slug> id\n", id)
+		return 2
+	}
+
+	path := filepath.Join(epicsRootFor(*dir), id, backlog.EpicFile)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "daedalus: epic %q not found\n", id)
+			return 2
+		}
+		logger.Error("epic show failed", "phase", "read", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: epic show failed: %v\n", err)
+		return 1
+	}
+	logger.Info("epic shown", "id", id)
+	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// runEpicEdit handles `daedalus epic edit <epic-id>`: edits metadata/body in place,
+// validated before an atomic write; an invalid edit leaves the file intact (R8/CA8).
+func runEpicEdit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus epic edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the epic")
+	title := fs.String("title", "", "set the title")
+	status := fs.String("status", "", "set the status: "+joinBacklogStatuses())
+	priority := fs.String("priority", "", "set the priority: "+joinBacklogPriorities())
+	specSlug := fs.String("spec", "", "set the originating spec link by slug (empty clears it)")
+	archSlug := fs.String("architecture", "", "set the originating architecture link by slug (empty clears it)")
+	dependsOn := fs.String("depends-on", "", "set the dependency ids (comma-separated; empty clears)")
+	body := fs.String("body", "", "set the body inline")
+	bodyFile := fs.String("body-file", "", "set the body from a file (takes precedence over --body)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus epic edit <epic-id> [flags]\n\n"+
+			"Edit an epic's metadata (title, status, priority, links, dependencies) or body.\n"+
+			"At least one edit flag is required. A non-empty --spec/--architecture must exist;\n"+
+			"passing them empty clears the link. The edit is validated before writing; an\n"+
+			"invalid edit is rejected and the existing file is left intact.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitSinglePositional(args, "epic id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	spec, code := buildEpicEditSpec(fs, *dir, *title, *status, *priority, *specSlug, *archSlug, *dependsOn, *body, *bodyFile, stderr)
+	if code != 0 {
+		return code
+	}
+	if spec.IsEmpty() {
+		fmt.Fprint(stderr, "daedalus: epic edit requires at least one edit flag\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	epicsRoot := epicsRootFor(*dir)
+	edited, err := backlog.EditEpic(epicsRoot, id, spec)
+	if err != nil {
+		return reportBacklogEditError(stderr, logger, "epic", id, err)
+	}
+	logger.Info("epic edited", "id", edited.ID)
+	fmt.Fprintf(stdout, "Edited epic %q at %s.\n", edited.ID, filepath.ToSlash(filepath.Join(epicsRoot, edited.ID, backlog.EpicFile)))
+	return 0
+}
+
+// runEpicRemove handles `daedalus epic remove <epic-id>`. Removing an epic removes its
+// nested tickets too (they live inside it); the result message says so.
+func runEpicRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus epic remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the epic")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus epic remove <epic-id> [--path .]\n\n"+
+			"Delete an epic folder, including its nested tickets.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitSinglePositional(args, "epic id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	epicsRoot := epicsRootFor(*dir)
+	if err := backlog.RemoveEpic(epicsRoot, id); err != nil {
+		if errors.Is(err, backlog.ErrEpicNotFound) || !backlog.IsEpicID(id) {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		}
+		logger.Error("epic remove failed", "phase", "remove", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: epic remove failed: %v\n", err)
+		return 1
+	}
+	logger.Info("epic removed", "id", id)
+	fmt.Fprintf(stdout, "Removed epic %q (and its tickets) from %s.\n",
+		id, filepath.ToSlash(filepath.Join(epicsRoot, id)))
+	return 0
+}
+
+// --- ticket subcommand ---
+
+// runTicket handles the `daedalus ticket` subcommand. Tickets are nested under their
+// epic, so every operation takes the epic id plus the ticket id/sequence.
+func runTicket(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, ticketUsage)
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return runTicketCreate(args[1:], stdout, stderr)
+	case "list":
+		return runTicketList(args[1:], stdout, stderr)
+	case "show":
+		return runTicketShow(args[1:], stdout, stderr)
+	case "edit":
+		return runTicketEdit(args[1:], stdout, stderr)
+	case "remove":
+		return runTicketRemove(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown ticket operation %q\n\n%s", args[0], ticketUsage)
+		return 2
+	}
+}
+
+const ticketUsage = "Usage: daedalus ticket <operation> [flags]\n\n" +
+	"Work with the SDD backlog's tickets, nested under their epic in .daedalus/epics/.\n" +
+	"Daedalus manages the definition only; it does not run the planner agent.\n\n" +
+	"Operations:\n" +
+	"  create <epic-id> <MM> <slug> --title <t> [flags]   create a ticket under the epic\n" +
+	"  list <epic-id>                                     list an epic's tickets\n" +
+	"  show <epic-id> <ticket-id>                         print a ticket's ticket.md verbatim\n" +
+	"  edit <epic-id> <ticket-id> [flags]                 edit a ticket's metadata or body\n" +
+	"  remove <epic-id> <ticket-id>                       delete a ticket folder\n\n" +
+	"Run 'daedalus ticket <operation> --help' for an operation's flags.\n"
+
+// runTicketCreate handles `daedalus ticket create <epic-id> <MM> <slug> --title <t>`.
+// The epic number NN is derived from the parent epic id so the ticket id stays
+// consistent (ticket-NN-MM-<slug>); the user supplies only MM and the slug. The parent
+// epic must already exist (structural prerequisite). Non-destructive; --preview supported.
+func runTicketCreate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus ticket create", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the parent epic")
+	title := fs.String("title", "", "ticket title (required)")
+	status := fs.String("status", "", "status: "+joinBacklogStatuses()+" (default: "+string(backlog.DefaultStatus)+")")
+	priority := fs.String("priority", "", "priority: "+joinBacklogPriorities()+" (default: "+string(backlog.DefaultPriority)+")")
+	specSlug := fs.String("spec", "", "originating spec slug to link (optional; must exist)")
+	archSlug := fs.String("architecture", "", "originating architecture slug to link (optional; must exist)")
+	dependsOn := fs.String("depends-on", "", "comma-separated dependency ids (optional)")
+	body := fs.String("body", "", "ticket body inline")
+	bodyFile := fs.String("body-file", "", "ticket body from a file (takes precedence over --body)")
+	preview := fs.Bool("preview", false, "show the file that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus ticket create <epic-id> <MM> <slug> --title <t> [flags]\n\n"+
+			"Create a ticket as the folder ticket-NN-MM-<slug>/ with ticket.md nested under\n"+
+			"its epic (NN is taken from the epic id). The parent epic must already exist.\n"+
+			"Daedalus does NOT run the planner. Existing tickets are not overwritten.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	positionals, flags := splitPositionals(args)
+	if hasHelp(flags) {
+		fs.Usage()
+		return 0
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if len(positionals) != 3 {
+		fmt.Fprint(stderr, "daedalus: ticket create requires exactly an epic id, a sequence and a slug\n\n")
+		fs.Usage()
+		return 2
+	}
+	epicID, sequence, slug := positionals[0], positionals[1], positionals[2]
+
+	logger := logging.New(stderr)
+
+	if !backlog.IsEpicID(epicID) {
+		fmt.Fprintf(stderr, "daedalus: epic id %q is not a valid epic-NN-<slug> id\n", epicID)
+		return 2
+	}
+	// Derive the ticket's NN from its parent epic so the two are always consistent.
+	number := backlog.EpicNumberOf(epicID)
+
+	bodyText, code := resolveBody(*body, *bodyFile, stderr, logger, "ticket create")
+	if code != 0 {
+		return code
+	}
+	specRef, code := resolveSpecLink(*dir, *specSlug, stderr)
+	if code != 0 {
+		return code
+	}
+	archRef, code := resolveArchitectureLink(*dir, *archSlug, stderr)
+	if code != 0 {
+		return code
+	}
+
+	ticket := backlog.Ticket{
+		ID:              backlog.TicketID(number, sequence, slug),
+		EpicID:          epicID,
+		Title:           *title,
+		Status:          backlog.Status(*status),
+		Priority:        backlog.Priority(*priority),
+		SpecRef:         specRef,
+		ArchitectureRef: archRef,
+		DependsOn:       splitList(*dependsOn),
+		Body:            bodyText,
+	}
+	epicsRoot := epicsRootFor(*dir)
+
+	plan, err := backlog.PlanCreateTicket(epicsRoot, ticket)
+	if err != nil {
+		if errors.Is(err, backlog.ErrParentEpicMissing) {
+			logger.Error("ticket create rejected", "phase", "plan", "id", ticket.ID, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v; create the epic first\n", err)
+			return 2
+		}
+		logger.Error("ticket create rejected", "phase", "plan", "id", ticket.ID, "err", err)
+		if isBacklogInvalid(err) {
+			fmt.Fprintf(stderr, "daedalus: ticket %q is invalid; it was not created:\n", ticket.ID)
+			writeBacklogSchemaErrors(stderr, err)
+		} else {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		}
+		return 2
+	}
+
+	logger.Info("ticket create planned", "id", plan.Ticket.ID, "epic", plan.Ticket.EpicID, "path", plan.Path)
+
+	if *preview {
+		fmt.Fprintf(stdout, "Preview of creating ticket %q at %s:\n", plan.Ticket.ID, filepath.ToSlash(plan.Path))
+		fmt.Fprint(stdout, plan.Content)
+		return 0
+	}
+
+	if err := plan.Apply(); err != nil {
+		if errors.Is(err, backlog.ErrTicketExists) {
+			logger.Error("ticket create rejected", "phase", "apply", "id", ticket.ID, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v — not overwritten\n", err)
+			return 2
+		}
+		logger.Error("ticket create failed", "phase", "apply", "id", ticket.ID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: ticket create failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("ticket created", "id", plan.Ticket.ID, "epic", plan.Ticket.EpicID)
+	fmt.Fprintf(stdout, "Created ticket %q at %s.\n", plan.Ticket.ID, filepath.ToSlash(plan.Path))
+	return 0
+}
+
+// runTicketList handles `daedalus ticket list <epic-id>`.
+func runTicketList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus ticket list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the epic")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus ticket list <epic-id> [--path .]\n\n"+
+			"List an epic's tickets (id, status, priority, title).\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	epicID, flags, err := splitSinglePositional(args, "epic id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	if !backlog.IsEpicID(epicID) {
+		fmt.Fprintf(stderr, "daedalus: epic id %q is not a valid epic-NN-<slug> id\n", epicID)
+		return 2
+	}
+
+	entries, err := backlog.ListTickets(epicsRootFor(*dir), epicID)
+	if err != nil {
+		logger.Error("ticket list failed", "phase", "list", "epic", epicID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: ticket list failed: %v\n", err)
+		return 1
+	}
+	logger.Info("tickets listed", "epic", epicID, "tickets", len(entries))
+	fmt.Fprintf(stdout, "Tickets of %s (%d):\n", epicID, len(entries))
+	for _, tk := range entries {
+		fmt.Fprintf(stdout, "  %s\t%s\t%s\t%s\n", tk.ID, tk.Status, tk.Priority, tk.Title)
+	}
+	return 0
+}
+
+// runTicketShow handles `daedalus ticket show <epic-id> <ticket-id>`.
+func runTicketShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus ticket show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the ticket")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus ticket show <epic-id> <ticket-id> [--path .]\n\n"+
+			"Print the ticket's ticket.md content verbatim.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	ids, flags, err := splitTwoPositionals(args, "epic id", "ticket id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	epicID, ticketID := ids[0], ids[1]
+
+	logger := logging.New(stderr)
+	if !backlog.IsEpicID(epicID) || !backlog.IsTicketID(ticketID) {
+		fmt.Fprintf(stderr, "daedalus: invalid epic or ticket id (%q / %q)\n", epicID, ticketID)
+		return 2
+	}
+
+	path := filepath.Join(epicsRootFor(*dir), epicID, backlog.TicketsSubdir, ticketID, backlog.TicketFile)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "daedalus: ticket %q not found under %q\n", ticketID, epicID)
+			return 2
+		}
+		logger.Error("ticket show failed", "phase", "read", "id", ticketID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: ticket show failed: %v\n", err)
+		return 1
+	}
+	logger.Info("ticket shown", "id", ticketID)
+	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// runTicketEdit handles `daedalus ticket edit <epic-id> <ticket-id>`.
+func runTicketEdit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus ticket edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the ticket")
+	title := fs.String("title", "", "set the title")
+	status := fs.String("status", "", "set the status: "+joinBacklogStatuses())
+	priority := fs.String("priority", "", "set the priority: "+joinBacklogPriorities())
+	specSlug := fs.String("spec", "", "set the originating spec link by slug (empty clears it)")
+	archSlug := fs.String("architecture", "", "set the originating architecture link by slug (empty clears it)")
+	dependsOn := fs.String("depends-on", "", "set the dependency ids (comma-separated; empty clears)")
+	body := fs.String("body", "", "set the body inline")
+	bodyFile := fs.String("body-file", "", "set the body from a file (takes precedence over --body)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus ticket edit <epic-id> <ticket-id> [flags]\n\n"+
+			"Edit a ticket's metadata (title, status, priority, links, dependencies) or body.\n"+
+			"At least one edit flag is required. A non-empty --spec/--architecture must exist;\n"+
+			"passing them empty clears the link. The edit is validated before writing; an\n"+
+			"invalid edit is rejected and the existing file is left intact.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	ids, flags, err := splitTwoPositionals(args, "epic id", "ticket id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	epicID, ticketID := ids[0], ids[1]
+
+	logger := logging.New(stderr)
+
+	spec, code := buildTicketEditSpec(fs, *dir, *title, *status, *priority, *specSlug, *archSlug, *dependsOn, *body, *bodyFile, stderr)
+	if code != 0 {
+		return code
+	}
+	if spec.IsEmpty() {
+		fmt.Fprint(stderr, "daedalus: ticket edit requires at least one edit flag\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	epicsRoot := epicsRootFor(*dir)
+	edited, err := backlog.EditTicket(epicsRoot, epicID, ticketID, spec)
+	if err != nil {
+		return reportBacklogEditError(stderr, logger, "ticket", ticketID, err)
+	}
+	logger.Info("ticket edited", "id", edited.ID, "epic", edited.EpicID)
+	fmt.Fprintf(stdout, "Edited ticket %q at %s.\n", edited.ID,
+		filepath.ToSlash(filepath.Join(epicsRoot, epicID, backlog.TicketsSubdir, ticketID, backlog.TicketFile)))
+	return 0
+}
+
+// runTicketRemove handles `daedalus ticket remove <epic-id> <ticket-id>`.
+func runTicketRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus ticket remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the ticket")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus ticket remove <epic-id> <ticket-id> [--path .]\n\n"+
+			"Delete a ticket folder. The epic and sibling tickets are left intact.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	ids, flags, err := splitTwoPositionals(args, "epic id", "ticket id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	epicID, ticketID := ids[0], ids[1]
+
+	logger := logging.New(stderr)
+	epicsRoot := epicsRootFor(*dir)
+	if err := backlog.RemoveTicket(epicsRoot, epicID, ticketID); err != nil {
+		if errors.Is(err, backlog.ErrTicketNotFound) || !backlog.IsEpicID(epicID) || !backlog.IsTicketID(ticketID) {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		}
+		logger.Error("ticket remove failed", "phase", "remove", "id", ticketID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: ticket remove failed: %v\n", err)
+		return 1
+	}
+	logger.Info("ticket removed", "id", ticketID, "epic", epicID)
+	fmt.Fprintf(stdout, "Removed ticket %q from %s.\n", ticketID,
+		filepath.ToSlash(filepath.Join(epicsRoot, epicID, backlog.TicketsSubdir, ticketID)))
+	return 0
+}
+
+// --- backlog CLI helpers ---
+
+// buildEpicEditSpec assembles a backlog.EpicEditSpec from the parsed flags, using
+// fs.Visit so an explicit empty value is a deliberate change. A non-empty --spec/
+// --architecture is resolved and verified to exist; on a flag-level error it reports to
+// stderr and returns exit code 2. Returns (spec, 0) on success.
+func buildEpicEditSpec(fs *flag.FlagSet, dir, title, status, priority, specSlug, archSlug, dependsOn, body, bodyFile string, stderr io.Writer) (backlog.EpicEditSpec, int) {
+	var spec backlog.EpicEditSpec
+	set := visitedFlags(fs)
+
+	if set["title"] {
+		spec.SetTitle = true
+		spec.Title = title
+	}
+	if set["status"] {
+		spec.SetStatus = true
+		spec.Status = backlog.Status(status)
+	}
+	if set["priority"] {
+		spec.SetPriority = true
+		spec.Priority = backlog.Priority(priority)
+	}
+	if set["spec"] {
+		ref, code := resolveSpecLink(dir, specSlug, stderr)
+		if code != 0 {
+			return backlog.EpicEditSpec{}, code
+		}
+		spec.SetSpec = true
+		spec.Spec = ref
+	}
+	if set["architecture"] {
+		ref, code := resolveArchitectureLink(dir, archSlug, stderr)
+		if code != 0 {
+			return backlog.EpicEditSpec{}, code
+		}
+		spec.SetArchitecture = true
+		spec.Architecture = ref
+	}
+	if set["depends-on"] {
+		spec.SetDependsOn = true
+		spec.DependsOn = splitList(dependsOn)
+	}
+	if code := applyBodyEdit(set, body, bodyFile, stderr, &spec.SetBody, &spec.Body); code != 0 {
+		return backlog.EpicEditSpec{}, code
+	}
+	return spec, 0
+}
+
+// buildTicketEditSpec mirrors buildEpicEditSpec for tickets.
+func buildTicketEditSpec(fs *flag.FlagSet, dir, title, status, priority, specSlug, archSlug, dependsOn, body, bodyFile string, stderr io.Writer) (backlog.TicketEditSpec, int) {
+	var spec backlog.TicketEditSpec
+	set := visitedFlags(fs)
+
+	if set["title"] {
+		spec.SetTitle = true
+		spec.Title = title
+	}
+	if set["status"] {
+		spec.SetStatus = true
+		spec.Status = backlog.Status(status)
+	}
+	if set["priority"] {
+		spec.SetPriority = true
+		spec.Priority = backlog.Priority(priority)
+	}
+	if set["spec"] {
+		ref, code := resolveSpecLink(dir, specSlug, stderr)
+		if code != 0 {
+			return backlog.TicketEditSpec{}, code
+		}
+		spec.SetSpec = true
+		spec.Spec = ref
+	}
+	if set["architecture"] {
+		ref, code := resolveArchitectureLink(dir, archSlug, stderr)
+		if code != 0 {
+			return backlog.TicketEditSpec{}, code
+		}
+		spec.SetArchitecture = true
+		spec.Architecture = ref
+	}
+	if set["depends-on"] {
+		spec.SetDependsOn = true
+		spec.DependsOn = splitList(dependsOn)
+	}
+	if code := applyBodyEdit(set, body, bodyFile, stderr, &spec.SetBody, &spec.Body); code != 0 {
+		return backlog.TicketEditSpec{}, code
+	}
+	return spec, 0
+}
+
+// applyBodyEdit resolves the --body/--body-file pair into the SetBody/Body targets,
+// honoring the --body-file-wins precedence. Returns exit code 2 on a read failure.
+func applyBodyEdit(set map[string]bool, body, bodyFile string, stderr io.Writer, setBody *bool, bodyOut *string) int {
+	switch {
+	case set["body-file"]:
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return 2
+		}
+		*setBody = true
+		*bodyOut = string(b)
+	case set["body"]:
+		*setBody = true
+		*bodyOut = body
+	}
+	return 0
+}
+
+// resolveBody resolves the create-time --body/--body-file pair (body-file wins). Returns
+// (text, 0) on success or ("", 2) on a read failure (already reported).
+func resolveBody(body, bodyFile string, stderr io.Writer, logger *slog.Logger, op string) (string, int) {
+	if bodyFile != "" {
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			logger.Error(op+" rejected", "phase", "flags", "err", err)
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return "", 2
+		}
+		return string(b), 0
+	}
+	return body, 0
+}
+
+// resolveSpecLink translates an optional --spec slug into the stored reference
+// (<slug>.md), verifying the spec exists (friendly CLI check, as in 05-02). An empty slug
+// yields an empty reference (no link). Returns (ref, 0) on success or ("", 2) on error.
+func resolveSpecLink(dir, specSlug string, stderr io.Writer) (string, int) {
+	if strings.TrimSpace(specSlug) == "" {
+		return "", 0
+	}
+	if !specs.IsKebabCase(specSlug) {
+		fmt.Fprintf(stderr, "daedalus: --spec %q is not valid kebab-case\n", specSlug)
+		return "", 2
+	}
+	if !specExistsFor(dir, specSlug) {
+		fmt.Fprintf(stderr, "daedalus: spec %q not found in %s; capture it first or omit --spec\n",
+			specSlug, filepath.ToSlash(filepath.Join(workspace.Name, specs.SpecsDir)))
+		return "", 2
+	}
+	return specSlug + specs.FileExt, 0
+}
+
+// resolveArchitectureLink translates an optional --architecture slug into the stored
+// reference (<slug>.md), verifying the document exists. Mirrors resolveSpecLink.
+func resolveArchitectureLink(dir, archSlug string, stderr io.Writer) (string, int) {
+	if strings.TrimSpace(archSlug) == "" {
+		return "", 0
+	}
+	if !architecture.IsKebabCase(archSlug) {
+		fmt.Fprintf(stderr, "daedalus: --architecture %q is not valid kebab-case\n", archSlug)
+		return "", 2
+	}
+	path := filepath.Join(dir, workspace.Name, architecture.ArchitectureDir, archSlug+architecture.FileExt)
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		fmt.Fprintf(stderr, "daedalus: architecture document %q not found in %s; create it first or omit --architecture\n",
+			archSlug, filepath.ToSlash(filepath.Join(workspace.Name, architecture.ArchitectureDir)))
+		return "", 2
+	}
+	return archSlug + architecture.FileExt, 0
+}
+
+// reportBacklogEditError maps an epic/ticket edit error to a consistent message and exit
+// code: not-found and schema-invalid are usage errors (2); malformed and I/O are 1.
+func reportBacklogEditError(stderr io.Writer, logger *slog.Logger, kind, id string, err error) int {
+	switch {
+	case errors.Is(err, backlog.ErrEpicNotFound), errors.Is(err, backlog.ErrTicketNotFound):
+		logger.Error(kind+" edit rejected", "phase", "load", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		fmt.Fprintf(stderr, "the %s must already exist; create it first\n", kind)
+		return 2
+	case errors.Is(err, backlog.ErrMalformed):
+		logger.Error(kind+" edit failed", "phase", "load", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return 1
+	case isBacklogInvalid(err):
+		logger.Error(kind+" edit rejected", "phase", "validate", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %s %q is invalid; the edit was not applied:\n", kind, id)
+		writeBacklogSchemaErrors(stderr, err)
+		return 2
+	default:
+		logger.Error(kind+" edit failed", "phase", "write", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %s edit failed: %v\n", kind, err)
+		return 1
+	}
+}
+
+// visitedFlags returns the set of flag names the user actually passed, so an explicit
+// empty value is distinguishable from an unset flag.
+func visitedFlags(fs *flag.FlagSet) map[string]bool {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	return set
+}
+
+// hasHelp reports whether the flag tokens include a help request, so a multi-positional
+// operation can show usage without first failing the positional-count check.
+func hasHelp(flags []string) bool {
+	for _, f := range flags {
+		if f == "-h" || f == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+// splitSinglePositional extracts exactly one positional (named noun for errors) plus the
+// flag tokens, allowing a help token without a positional.
+func splitSinglePositional(args []string, noun string) (string, []string, error) {
+	positionals, flags := splitPositionals(args)
+	if hasHelp(flags) {
+		return "", flags, nil
+	}
+	switch len(positionals) {
+	case 1:
+		return positionals[0], flags, nil
+	case 0:
+		return "", flags, fmt.Errorf("this operation requires exactly one %s", noun)
+	default:
+		return "", flags, fmt.Errorf("this operation requires exactly one %s, got %d", noun, len(positionals))
+	}
+}
+
+// splitTwoPositionals extracts exactly two positionals (named for errors) plus the flag
+// tokens, allowing a help token without positionals.
+func splitTwoPositionals(args []string, first, second string) ([2]string, []string, error) {
+	positionals, flags := splitPositionals(args)
+	if hasHelp(flags) {
+		return [2]string{}, flags, nil
+	}
+	if len(positionals) != 2 {
+		return [2]string{}, flags, fmt.Errorf("this operation requires exactly a %s and a %s", first, second)
+	}
+	return [2]string{positionals[0], positionals[1]}, flags, nil
+}
+
+// joinBacklogStatuses / joinBacklogPriorities render the closed metadata sets for CLI
+// help, so the values a user sees in help match the validator's set exactly.
+func joinBacklogStatuses() string {
+	parts := make([]string, 0)
+	for _, s := range backlog.Statuses() {
+		parts = append(parts, string(s))
+	}
+	return strings.Join(parts, "|")
+}
+
+func joinBacklogPriorities() string {
+	parts := make([]string, 0)
+	for _, p := range backlog.Priorities() {
+		parts = append(parts, string(p))
+	}
+	return strings.Join(parts, "|")
+}
+
+// isBacklogInvalid reports whether err is (or wraps) a *backlog.ValidationError.
+func isBacklogInvalid(err error) bool {
+	var ve *backlog.ValidationError
+	return errors.As(err, &ve)
+}
+
+// writeBacklogSchemaErrors renders a backlog validation failure as actionable lines, one
+// finding per line, so the user can fix every problem in one pass.
+func writeBacklogSchemaErrors(w io.Writer, err error) {
+	var ve *backlog.ValidationError
+	if !errors.As(err, &ve) {
+		fmt.Fprintf(w, "  - %v\n", err)
+		return
+	}
+	for _, se := range ve.Errors {
+		fmt.Fprintf(w, "  - %s: observed %s; expected %s\n", se.Field, se.Observed, se.Expected)
+	}
+}
+
+// --- trace subcommand ---
+
+// runTrace handles the `daedalus trace` subcommand, a thin CLI surface over the
+// traceability aggregator (internal/traceability). It dispatches to verify (check the
+// whole chain) and show (navigate from one artifact). It is read-only and runs no agents
+// (R5/CA6). It keeps the same conventions as the sibling subcommands (own usage, logging
+// to stderr).
+func runTrace(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, traceUsage)
+		return 2
+	}
+	switch args[0] {
+	case "verify":
+		return runTraceVerify(args[1:], stdout, stderr)
+	case "show":
+		return runTraceShow(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown trace operation %q\n\n%s", args[0], traceUsage)
+		return 2
+	}
+}
+
+const traceUsage = "Usage: daedalus trace <operation> [flags]\n\n" +
+	"Consolidate and verify the SDD spec -> epic -> ticket traceability chain.\n" +
+	"Read-only: it reuses the links already recorded in specs/architecture/epics/tickets.\n\n" +
+	"Operations:\n" +
+	"  verify                    check the chain; report inconsistencies (exit 1 on hard errors)\n" +
+	"  show <artifact-id>        navigate the chain from a spec slug, epic id or ticket id\n\n" +
+	"Run 'daedalus trace <operation> --help' for an operation's flags.\n"
+
+// buildTraceGraph assembles the traceability graph over the three canonical workspace
+// roots under dir. Centralized so verify and show build the graph identically.
+func buildTraceGraph(dir string) (*traceability.Graph, error) {
+	return traceability.Build(specsRootFor(dir), architectureRootFor(dir), epicsRootFor(dir))
+}
+
+// runTraceVerify handles `daedalus trace verify`: it builds the chain and reports every
+// inconsistency in deterministic order, with a summary. Exit code mirrors workflow
+// validate: 0 when the chain has no hard errors (warnings/gaps do NOT fail), 1 when there
+// is at least one error-level inconsistency, 2 on a usage/IO error. Soft traceability
+// gaps (missing optional origin links) are reported but never affect the exit code,
+// honoring 05-03's optional-origin decision.
+func runTraceVerify(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus trace verify", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/ chain is verified")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus trace verify [--path .]\n\n"+
+			"Verify the spec -> epic -> ticket traceability chain. Reports broken links,\n"+
+			"orphan tickets and (as warnings) missing optional origin links. Exit 0 if there\n"+
+			"are no hard errors, 1 if there are, 2 on a usage error.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	graph, err := buildTraceGraph(*dir)
+	if err != nil {
+		logger.Error("trace verify failed", "phase", "build", "err", err)
+		fmt.Fprintf(stderr, "daedalus: trace verify failed: %v\n", err)
+		return 1
+	}
+
+	report := graph.Verify()
+	errs, warns := report.Counts()
+	logger.Info("trace verified", "errors", errs, "warnings", warns, "consistent", report.Consistent())
+
+	if report.Consistent() && warns == 0 {
+		fmt.Fprintln(stdout, "Traceability chain is consistent (no inconsistencies).")
+		return 0
+	}
+
+	if report.Consistent() {
+		fmt.Fprintf(stdout, "Traceability chain is consistent with %d warning%s (no hard errors):\n",
+			warns, plural(warns, "", "s"))
+	} else {
+		fmt.Fprintf(stdout, "Traceability chain has %d error%s and %d warning%s:\n",
+			errs, plural(errs, "", "s"), warns, plural(warns, "", "s"))
+	}
+	for _, f := range report.Findings {
+		fmt.Fprintf(stdout, "  - %s\n", f.Error())
+	}
+
+	// Only hard errors affect the exit code; warnings are informational.
+	if report.HasErrors() {
+		return 1
+	}
+	return 0
+}
+
+// runTraceShow handles `daedalus trace show <artifact-id>`: it navigates the chain from
+// the given artifact. The artifact kind is inferred from its id shape — a ticket id
+// (ticket-NN-MM-<slug>) climbs ascending; an epic id (epic-NN-<slug>) shows its origin
+// and its tickets; anything else is treated as a spec slug and descends. This single
+// entry point keeps the CLI small while covering both directions (R1/CA1/CA2).
+func runTraceShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus trace show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/ chain is navigated")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus trace show <artifact-id> [--path .]\n\n"+
+			"Navigate the traceability chain from an artifact. A spec slug descends to its\n"+
+			"epics and tickets; a ticket id (ticket-NN-MM-<slug>) ascends to its epic and\n"+
+			"origin spec/architecture; an epic id (epic-NN-<slug>) shows both.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitSinglePositional(args, "artifact id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	graph, err := buildTraceGraph(*dir)
+	if err != nil {
+		logger.Error("trace show failed", "phase", "build", "err", err)
+		fmt.Fprintf(stderr, "daedalus: trace show failed: %v\n", err)
+		return 1
+	}
+
+	switch {
+	case backlog.IsTicketID(id):
+		return traceShowTicket(stdout, stderr, graph, id)
+	case backlog.IsEpicID(id):
+		return traceShowEpic(stdout, stderr, graph, id)
+	default:
+		return traceShowSpec(stdout, stderr, graph, id)
+	}
+}
+
+// traceShowSpec renders the descending chain from a spec slug (R1/CA1).
+func traceShowSpec(stdout, stderr io.Writer, graph *traceability.Graph, slug string) int {
+	chain, ok := graph.DescendFromSpec(slug)
+	if !ok {
+		fmt.Fprintf(stderr, "daedalus: no spec %q in the traceability chain "+
+			"(a spec must be materialized; check 'daedalus spec list')\n", slug)
+		return 2
+	}
+	fmt.Fprintf(stdout, "spec %s — %s\n", chain.Spec.Slug, chain.Spec.Title)
+	if len(chain.Epics) == 0 {
+		fmt.Fprintln(stdout, "  (no epics link to this spec)")
+		return 0
+	}
+	for _, ewt := range chain.Epics {
+		fmt.Fprintf(stdout, "  └─ epic %s — %s\n", ewt.Epic.ID, ewt.Epic.Title)
+		if len(ewt.Tickets) == 0 {
+			fmt.Fprintln(stdout, "       (no tickets)")
+			continue
+		}
+		for _, tk := range ewt.Tickets {
+			fmt.Fprintf(stdout, "       └─ ticket %s — %s\n", tk.ID, tk.Title)
+		}
+	}
+	return 0
+}
+
+// traceShowEpic renders an epic's origin links (ascending half) and its tickets
+// (descending half), covering both directions from an epic (R1/CA1/CA2).
+func traceShowEpic(stdout, stderr io.Writer, graph *traceability.Graph, epicID string) int {
+	epic, ok := graph.Epics[epicID]
+	if !ok {
+		fmt.Fprintf(stderr, "daedalus: no epic %q in the traceability chain "+
+			"(check 'daedalus epic list')\n", epicID)
+		return 2
+	}
+	fmt.Fprintf(stdout, "epic %s — %s\n", epic.ID, epic.Title)
+	fmt.Fprintf(stdout, "  origin spec:         %s\n", traceRefOrNone(epic.SpecRef))
+	fmt.Fprintf(stdout, "  origin architecture: %s\n", traceRefOrNone(epic.ArchRef))
+
+	tickets := graph.TicketsOfEpic(epicID)
+	if len(tickets) == 0 {
+		fmt.Fprintln(stdout, "  tickets: (none)")
+	} else {
+		fmt.Fprintln(stdout, "  tickets:")
+		for _, tk := range tickets {
+			fmt.Fprintf(stdout, "    └─ ticket %s — %s\n", tk.ID, tk.Title)
+		}
+	}
+	return 0
+}
+
+// traceShowTicket renders the ascending chain from a ticket (R1/CA2): its epic and origin
+// spec/architecture, flagging a missing epic (orphan) explicitly.
+func traceShowTicket(stdout, stderr io.Writer, graph *traceability.Graph, ticketID string) int {
+	chain, ok := graph.AscendFromTicket(ticketID)
+	if !ok {
+		fmt.Fprintf(stderr, "daedalus: no ticket %q in the traceability chain "+
+			"(check 'daedalus ticket list <epic-id>')\n", ticketID)
+		return 2
+	}
+	fmt.Fprintf(stdout, "ticket %s — %s\n", chain.Ticket.ID, chain.Ticket.Title)
+	if chain.EpicFound {
+		fmt.Fprintf(stdout, "  └─ epic %s — %s\n", chain.Epic.ID, chain.Epic.Title)
+	} else {
+		fmt.Fprintf(stdout, "  └─ epic %s — MISSING (orphan ticket)\n", chain.Ticket.EpicID)
+	}
+	if chain.OriginSpecFound {
+		fmt.Fprintf(stdout, "       └─ origin spec %s — %s\n", chain.OriginSpec.Slug, chain.OriginSpec.Title)
+	} else {
+		fmt.Fprintln(stdout, "       └─ origin spec: (none resolved)")
+	}
+	if chain.OriginArchFound {
+		fmt.Fprintf(stdout, "       └─ origin architecture %s — %s\n", chain.OriginArch.Slug, chain.OriginArch.Title)
+	} else {
+		fmt.Fprintln(stdout, "       └─ origin architecture: (none resolved)")
+	}
+	return 0
+}
+
+// traceRefOrNone renders an origin reference or a placeholder when it is empty.
+func traceRefOrNone(ref string) string {
+	if ref == "" {
+		return "(none)"
+	}
+	return ref
+}
+
 // writePreview renders, on stdout, the directories and root artifacts a plan
 // would create. It lists nothing for an already-complete workspace so an
 // idempotent re-run produces an explicit "nothing to update" preview.
@@ -2077,6 +4271,17 @@ var valueFlags = map[string]struct{}{
 	"-outputs": {}, "--outputs": {},
 	"-gate": {}, "--gate": {},
 	"-depends-on": {}, "--depends-on": {},
+	// architecture-subcommand value flag (the optional spec link). Listed here too
+	// because the architecture subcommand shares splitPositionals; over-listing is
+	// harmless since a flag a given operation does not define simply never appears in
+	// its args.
+	"-spec": {}, "--spec": {},
+	// backlog (epic/ticket) value flags. Listed here too because the epic/ticket
+	// subcommands share splitPositionals; over-listing is harmless.
+	"-status": {}, "--status": {},
+	"-priority": {}, "--priority": {},
+	"-architecture": {}, "--architecture": {},
+	"-epic": {}, "--epic": {},
 }
 
 // splitPositionals separates the positional tokens from the flag tokens in an
