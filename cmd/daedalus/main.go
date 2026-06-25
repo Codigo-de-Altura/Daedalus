@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Codigo-de-Altura/Daedalus/internal/architecture"
+	"github.com/Codigo-de-Altura/Daedalus/internal/backlog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/buildinfo"
 	"github.com/Codigo-de-Altura/Daedalus/internal/catalog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
@@ -53,6 +55,10 @@ func run(args []string) int {
 			return runSpec(args[1:], os.Stdout, os.Stderr)
 		case "architecture":
 			return runArchitecture(args[1:], os.Stdout, os.Stderr)
+		case "epic":
+			return runEpic(args[1:], os.Stdout, os.Stderr)
+		case "ticket":
+			return runTicket(args[1:], os.Stdout, os.Stderr)
 		default:
 			fmt.Fprintf(os.Stderr, "daedalus: unknown command %q\nrun 'daedalus --help' for usage\n", args[0])
 			return 2
@@ -2989,6 +2995,955 @@ func writeArchitectureSchemaErrors(w io.Writer, err error) {
 	}
 }
 
+// epicsRootFor builds the canonical `.daedalus/epics/` directory under dir, which roots
+// the nested epic/ticket tree. Built here rather than in the backlog package so that
+// package stays free of the workspace-location convention (mirrors the sibling roots).
+func epicsRootFor(dir string) string {
+	return filepath.Join(dir, workspace.Name, backlog.EpicsDir)
+}
+
+// --- epic subcommand ---
+
+// runEpic handles the `daedalus epic` subcommand, a thin CLI surface over the backlog's
+// epic operations (internal/backlog). It dispatches to create/list/show/edit/remove,
+// keeping the same conventions as the sibling subcommands (own usage, exit code 2 for
+// usage errors, logging to stderr). Phase 1: none of these run the planner (R7/CA7).
+func runEpic(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, epicUsage)
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return runEpicCreate(args[1:], stdout, stderr)
+	case "list":
+		return runEpicList(args[1:], stdout, stderr)
+	case "show":
+		return runEpicShow(args[1:], stdout, stderr)
+	case "edit":
+		return runEpicEdit(args[1:], stdout, stderr)
+	case "remove":
+		return runEpicRemove(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown epic operation %q\n\n%s", args[0], epicUsage)
+		return 2
+	}
+}
+
+const epicUsage = "Usage: daedalus epic <operation> [flags]\n\n" +
+	"Work with the SDD backlog's epics in .daedalus/epics/.\n" +
+	"Daedalus manages the definition only; it does not run the planner agent.\n\n" +
+	"Operations:\n" +
+	"  create <NN> <slug> --title <t> [flags]   create an epic folder epic-NN-<slug>\n" +
+	"  list                                     list epics (id, status, priority, title)\n" +
+	"  show <epic-id>                           print an epic's epic.md verbatim\n" +
+	"  edit <epic-id> [flags]                   edit an epic's metadata or body\n" +
+	"  remove <epic-id>                         delete an epic folder (and its tickets)\n\n" +
+	"Run 'daedalus epic <operation> --help' for an operation's flags.\n"
+
+// runEpicCreate handles `daedalus epic create <NN> <slug> --title <t>`. Numbering is
+// explicit and deterministic: the user supplies NN and the slug, which compose the
+// canonical id `epic-NN-<slug>` (no auto-increment, no hidden state). Metadata flags set
+// status/priority/links/dependencies. Optional --spec/--architecture links are verified
+// to exist (friendly check, CLI-layer) before recording. Non-destructive; --preview
+// shows the file without writing.
+func runEpicCreate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus epic create", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ the epic is added to")
+	title := fs.String("title", "", "epic title (required)")
+	status := fs.String("status", "", "status: "+joinBacklogStatuses()+" (default: "+string(backlog.DefaultStatus)+")")
+	priority := fs.String("priority", "", "priority: "+joinBacklogPriorities()+" (default: "+string(backlog.DefaultPriority)+")")
+	specSlug := fs.String("spec", "", "originating spec slug to link (optional; must exist)")
+	archSlug := fs.String("architecture", "", "originating architecture slug to link (optional; must exist)")
+	dependsOn := fs.String("depends-on", "", "comma-separated dependency ids (optional)")
+	body := fs.String("body", "", "epic body inline")
+	bodyFile := fs.String("body-file", "", "epic body from a file (takes precedence over --body)")
+	preview := fs.Bool("preview", false, "show the file that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus epic create <NN> <slug> --title <t> [flags]\n\n"+
+			"Create an epic as the folder epic-NN-<slug>/ with epic.md in the target\n"+
+			"workspace's .daedalus/epics/ directory. NN is the epic number and <slug> is\n"+
+			"kebab-case. Daedalus does NOT run the planner. Existing epics are not\n"+
+			"overwritten.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	positionals, flags := splitPositionals(args)
+	if hasHelp(flags) {
+		fs.Usage()
+		return 0
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if len(positionals) != 2 {
+		fmt.Fprint(stderr, "daedalus: epic create requires exactly a number and a slug\n\n")
+		fs.Usage()
+		return 2
+	}
+	number, slug := positionals[0], positionals[1]
+
+	logger := logging.New(stderr)
+
+	bodyText, code := resolveBody(*body, *bodyFile, stderr, logger, "epic create")
+	if code != 0 {
+		return code
+	}
+
+	// Resolve optional origin links by slug, verifying existence (friendly CLI check).
+	specRef, code := resolveSpecLink(*dir, *specSlug, stderr)
+	if code != 0 {
+		return code
+	}
+	archRef, code := resolveArchitectureLink(*dir, *archSlug, stderr)
+	if code != 0 {
+		return code
+	}
+
+	epic := backlog.Epic{
+		ID:              backlog.EpicID(number, slug),
+		Title:           *title,
+		Status:          backlog.Status(*status),
+		Priority:        backlog.Priority(*priority),
+		SpecRef:         specRef,
+		ArchitectureRef: archRef,
+		DependsOn:       splitList(*dependsOn),
+		Body:            bodyText,
+	}
+	epicsRoot := epicsRootFor(*dir)
+
+	plan, err := backlog.PlanCreateEpic(epicsRoot, epic)
+	if err != nil {
+		logger.Error("epic create rejected", "phase", "plan", "id", epic.ID, "err", err)
+		if isBacklogInvalid(err) {
+			fmt.Fprintf(stderr, "daedalus: epic %q is invalid; it was not created:\n", epic.ID)
+			writeBacklogSchemaErrors(stderr, err)
+		} else {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		}
+		return 2
+	}
+
+	logger.Info("epic create planned", "id", plan.Epic.ID, "path", plan.Path)
+
+	if *preview {
+		fmt.Fprintf(stdout, "Preview of creating epic %q at %s:\n", plan.Epic.ID, filepath.ToSlash(plan.Path))
+		fmt.Fprint(stdout, plan.Content)
+		return 0
+	}
+
+	if err := plan.Apply(); err != nil {
+		if errors.Is(err, backlog.ErrEpicExists) {
+			logger.Error("epic create rejected", "phase", "apply", "id", epic.ID, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v — not overwritten\n", err)
+			return 2
+		}
+		logger.Error("epic create failed", "phase", "apply", "id", epic.ID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: epic create failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("epic created", "id", plan.Epic.ID)
+	fmt.Fprintf(stdout, "Created epic %q at %s.\n", plan.Epic.ID, filepath.ToSlash(plan.Path))
+	return 0
+}
+
+// runEpicList handles `daedalus epic list`.
+func runEpicList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus epic list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ is listed")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus epic list [--path .]\n\n"+
+			"List the epics (id, status, priority, title).\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	entries, err := backlog.ListEpics(epicsRootFor(*dir))
+	if err != nil {
+		logger.Error("epic list failed", "phase", "list", "err", err)
+		fmt.Fprintf(stderr, "daedalus: epic list failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("epics listed", "epics", len(entries))
+	fmt.Fprintf(stdout, "Epics (%d):\n", len(entries))
+	for _, e := range entries {
+		fmt.Fprintf(stdout, "  %s\t%s\t%s\t%s\n", e.ID, e.Status, e.Priority, e.Title)
+	}
+	return 0
+}
+
+// runEpicShow handles `daedalus epic show <epic-id>`.
+func runEpicShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus epic show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the epic")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus epic show <epic-id> [--path .]\n\n"+
+			"Print the epic's epic.md content verbatim.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitSinglePositional(args, "epic id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	if !backlog.IsEpicID(id) {
+		fmt.Fprintf(stderr, "daedalus: epic id %q is not a valid epic-NN-<slug> id\n", id)
+		return 2
+	}
+
+	path := filepath.Join(epicsRootFor(*dir), id, backlog.EpicFile)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "daedalus: epic %q not found\n", id)
+			return 2
+		}
+		logger.Error("epic show failed", "phase", "read", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: epic show failed: %v\n", err)
+		return 1
+	}
+	logger.Info("epic shown", "id", id)
+	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// runEpicEdit handles `daedalus epic edit <epic-id>`: edits metadata/body in place,
+// validated before an atomic write; an invalid edit leaves the file intact (R8/CA8).
+func runEpicEdit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus epic edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the epic")
+	title := fs.String("title", "", "set the title")
+	status := fs.String("status", "", "set the status: "+joinBacklogStatuses())
+	priority := fs.String("priority", "", "set the priority: "+joinBacklogPriorities())
+	specSlug := fs.String("spec", "", "set the originating spec link by slug (empty clears it)")
+	archSlug := fs.String("architecture", "", "set the originating architecture link by slug (empty clears it)")
+	dependsOn := fs.String("depends-on", "", "set the dependency ids (comma-separated; empty clears)")
+	body := fs.String("body", "", "set the body inline")
+	bodyFile := fs.String("body-file", "", "set the body from a file (takes precedence over --body)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus epic edit <epic-id> [flags]\n\n"+
+			"Edit an epic's metadata (title, status, priority, links, dependencies) or body.\n"+
+			"At least one edit flag is required. A non-empty --spec/--architecture must exist;\n"+
+			"passing them empty clears the link. The edit is validated before writing; an\n"+
+			"invalid edit is rejected and the existing file is left intact.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitSinglePositional(args, "epic id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+
+	spec, code := buildEpicEditSpec(fs, *dir, *title, *status, *priority, *specSlug, *archSlug, *dependsOn, *body, *bodyFile, stderr)
+	if code != 0 {
+		return code
+	}
+	if spec.IsEmpty() {
+		fmt.Fprint(stderr, "daedalus: epic edit requires at least one edit flag\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	epicsRoot := epicsRootFor(*dir)
+	edited, err := backlog.EditEpic(epicsRoot, id, spec)
+	if err != nil {
+		return reportBacklogEditError(stderr, logger, "epic", id, err)
+	}
+	logger.Info("epic edited", "id", edited.ID)
+	fmt.Fprintf(stdout, "Edited epic %q at %s.\n", edited.ID, filepath.ToSlash(filepath.Join(epicsRoot, edited.ID, backlog.EpicFile)))
+	return 0
+}
+
+// runEpicRemove handles `daedalus epic remove <epic-id>`. Removing an epic removes its
+// nested tickets too (they live inside it); the result message says so.
+func runEpicRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus epic remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the epic")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus epic remove <epic-id> [--path .]\n\n"+
+			"Delete an epic folder, including its nested tickets.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	id, flags, err := splitSinglePositional(args, "epic id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	epicsRoot := epicsRootFor(*dir)
+	if err := backlog.RemoveEpic(epicsRoot, id); err != nil {
+		if errors.Is(err, backlog.ErrEpicNotFound) || !backlog.IsEpicID(id) {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		}
+		logger.Error("epic remove failed", "phase", "remove", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: epic remove failed: %v\n", err)
+		return 1
+	}
+	logger.Info("epic removed", "id", id)
+	fmt.Fprintf(stdout, "Removed epic %q (and its tickets) from %s.\n",
+		id, filepath.ToSlash(filepath.Join(epicsRoot, id)))
+	return 0
+}
+
+// --- ticket subcommand ---
+
+// runTicket handles the `daedalus ticket` subcommand. Tickets are nested under their
+// epic, so every operation takes the epic id plus the ticket id/sequence.
+func runTicket(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprint(stderr, ticketUsage)
+		return 2
+	}
+	switch args[0] {
+	case "create":
+		return runTicketCreate(args[1:], stdout, stderr)
+	case "list":
+		return runTicketList(args[1:], stdout, stderr)
+	case "show":
+		return runTicketShow(args[1:], stdout, stderr)
+	case "edit":
+		return runTicketEdit(args[1:], stdout, stderr)
+	case "remove":
+		return runTicketRemove(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "daedalus: unknown ticket operation %q\n\n%s", args[0], ticketUsage)
+		return 2
+	}
+}
+
+const ticketUsage = "Usage: daedalus ticket <operation> [flags]\n\n" +
+	"Work with the SDD backlog's tickets, nested under their epic in .daedalus/epics/.\n" +
+	"Daedalus manages the definition only; it does not run the planner agent.\n\n" +
+	"Operations:\n" +
+	"  create <epic-id> <MM> <slug> --title <t> [flags]   create a ticket under the epic\n" +
+	"  list <epic-id>                                     list an epic's tickets\n" +
+	"  show <epic-id> <ticket-id>                         print a ticket's ticket.md verbatim\n" +
+	"  edit <epic-id> <ticket-id> [flags]                 edit a ticket's metadata or body\n" +
+	"  remove <epic-id> <ticket-id>                       delete a ticket folder\n\n" +
+	"Run 'daedalus ticket <operation> --help' for an operation's flags.\n"
+
+// runTicketCreate handles `daedalus ticket create <epic-id> <MM> <slug> --title <t>`.
+// The epic number NN is derived from the parent epic id so the ticket id stays
+// consistent (ticket-NN-MM-<slug>); the user supplies only MM and the slug. The parent
+// epic must already exist (structural prerequisite). Non-destructive; --preview supported.
+func runTicketCreate(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus ticket create", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the parent epic")
+	title := fs.String("title", "", "ticket title (required)")
+	status := fs.String("status", "", "status: "+joinBacklogStatuses()+" (default: "+string(backlog.DefaultStatus)+")")
+	priority := fs.String("priority", "", "priority: "+joinBacklogPriorities()+" (default: "+string(backlog.DefaultPriority)+")")
+	specSlug := fs.String("spec", "", "originating spec slug to link (optional; must exist)")
+	archSlug := fs.String("architecture", "", "originating architecture slug to link (optional; must exist)")
+	dependsOn := fs.String("depends-on", "", "comma-separated dependency ids (optional)")
+	body := fs.String("body", "", "ticket body inline")
+	bodyFile := fs.String("body-file", "", "ticket body from a file (takes precedence over --body)")
+	preview := fs.Bool("preview", false, "show the file that would be created without writing anything (dry run)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus ticket create <epic-id> <MM> <slug> --title <t> [flags]\n\n"+
+			"Create a ticket as the folder ticket-NN-MM-<slug>/ with ticket.md nested under\n"+
+			"its epic (NN is taken from the epic id). The parent epic must already exist.\n"+
+			"Daedalus does NOT run the planner. Existing tickets are not overwritten.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	positionals, flags := splitPositionals(args)
+	if hasHelp(flags) {
+		fs.Usage()
+		return 0
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if len(positionals) != 3 {
+		fmt.Fprint(stderr, "daedalus: ticket create requires exactly an epic id, a sequence and a slug\n\n")
+		fs.Usage()
+		return 2
+	}
+	epicID, sequence, slug := positionals[0], positionals[1], positionals[2]
+
+	logger := logging.New(stderr)
+
+	if !backlog.IsEpicID(epicID) {
+		fmt.Fprintf(stderr, "daedalus: epic id %q is not a valid epic-NN-<slug> id\n", epicID)
+		return 2
+	}
+	// Derive the ticket's NN from its parent epic so the two are always consistent.
+	number := backlog.EpicNumberOf(epicID)
+
+	bodyText, code := resolveBody(*body, *bodyFile, stderr, logger, "ticket create")
+	if code != 0 {
+		return code
+	}
+	specRef, code := resolveSpecLink(*dir, *specSlug, stderr)
+	if code != 0 {
+		return code
+	}
+	archRef, code := resolveArchitectureLink(*dir, *archSlug, stderr)
+	if code != 0 {
+		return code
+	}
+
+	ticket := backlog.Ticket{
+		ID:              backlog.TicketID(number, sequence, slug),
+		EpicID:          epicID,
+		Title:           *title,
+		Status:          backlog.Status(*status),
+		Priority:        backlog.Priority(*priority),
+		SpecRef:         specRef,
+		ArchitectureRef: archRef,
+		DependsOn:       splitList(*dependsOn),
+		Body:            bodyText,
+	}
+	epicsRoot := epicsRootFor(*dir)
+
+	plan, err := backlog.PlanCreateTicket(epicsRoot, ticket)
+	if err != nil {
+		if errors.Is(err, backlog.ErrParentEpicMissing) {
+			logger.Error("ticket create rejected", "phase", "plan", "id", ticket.ID, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v; create the epic first\n", err)
+			return 2
+		}
+		logger.Error("ticket create rejected", "phase", "plan", "id", ticket.ID, "err", err)
+		if isBacklogInvalid(err) {
+			fmt.Fprintf(stderr, "daedalus: ticket %q is invalid; it was not created:\n", ticket.ID)
+			writeBacklogSchemaErrors(stderr, err)
+		} else {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		}
+		return 2
+	}
+
+	logger.Info("ticket create planned", "id", plan.Ticket.ID, "epic", plan.Ticket.EpicID, "path", plan.Path)
+
+	if *preview {
+		fmt.Fprintf(stdout, "Preview of creating ticket %q at %s:\n", plan.Ticket.ID, filepath.ToSlash(plan.Path))
+		fmt.Fprint(stdout, plan.Content)
+		return 0
+	}
+
+	if err := plan.Apply(); err != nil {
+		if errors.Is(err, backlog.ErrTicketExists) {
+			logger.Error("ticket create rejected", "phase", "apply", "id", ticket.ID, "err", err)
+			fmt.Fprintf(stderr, "daedalus: %v — not overwritten\n", err)
+			return 2
+		}
+		logger.Error("ticket create failed", "phase", "apply", "id", ticket.ID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: ticket create failed: %v\n", err)
+		return 1
+	}
+
+	logger.Info("ticket created", "id", plan.Ticket.ID, "epic", plan.Ticket.EpicID)
+	fmt.Fprintf(stdout, "Created ticket %q at %s.\n", plan.Ticket.ID, filepath.ToSlash(plan.Path))
+	return 0
+}
+
+// runTicketList handles `daedalus ticket list <epic-id>`.
+func runTicketList(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus ticket list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the epic")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus ticket list <epic-id> [--path .]\n\n"+
+			"List an epic's tickets (id, status, priority, title).\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	epicID, flags, err := splitSinglePositional(args, "epic id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	logger := logging.New(stderr)
+	if !backlog.IsEpicID(epicID) {
+		fmt.Fprintf(stderr, "daedalus: epic id %q is not a valid epic-NN-<slug> id\n", epicID)
+		return 2
+	}
+
+	entries, err := backlog.ListTickets(epicsRootFor(*dir), epicID)
+	if err != nil {
+		logger.Error("ticket list failed", "phase", "list", "epic", epicID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: ticket list failed: %v\n", err)
+		return 1
+	}
+	logger.Info("tickets listed", "epic", epicID, "tickets", len(entries))
+	fmt.Fprintf(stdout, "Tickets of %s (%d):\n", epicID, len(entries))
+	for _, tk := range entries {
+		fmt.Fprintf(stdout, "  %s\t%s\t%s\t%s\n", tk.ID, tk.Status, tk.Priority, tk.Title)
+	}
+	return 0
+}
+
+// runTicketShow handles `daedalus ticket show <epic-id> <ticket-id>`.
+func runTicketShow(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus ticket show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the ticket")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus ticket show <epic-id> <ticket-id> [--path .]\n\n"+
+			"Print the ticket's ticket.md content verbatim.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	ids, flags, err := splitTwoPositionals(args, "epic id", "ticket id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	epicID, ticketID := ids[0], ids[1]
+
+	logger := logging.New(stderr)
+	if !backlog.IsEpicID(epicID) || !backlog.IsTicketID(ticketID) {
+		fmt.Fprintf(stderr, "daedalus: invalid epic or ticket id (%q / %q)\n", epicID, ticketID)
+		return 2
+	}
+
+	path := filepath.Join(epicsRootFor(*dir), epicID, backlog.TicketsSubdir, ticketID, backlog.TicketFile)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "daedalus: ticket %q not found under %q\n", ticketID, epicID)
+			return 2
+		}
+		logger.Error("ticket show failed", "phase", "read", "id", ticketID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: ticket show failed: %v\n", err)
+		return 1
+	}
+	logger.Info("ticket shown", "id", ticketID)
+	fmt.Fprint(stdout, string(content))
+	return 0
+}
+
+// runTicketEdit handles `daedalus ticket edit <epic-id> <ticket-id>`.
+func runTicketEdit(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus ticket edit", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the ticket")
+	title := fs.String("title", "", "set the title")
+	status := fs.String("status", "", "set the status: "+joinBacklogStatuses())
+	priority := fs.String("priority", "", "set the priority: "+joinBacklogPriorities())
+	specSlug := fs.String("spec", "", "set the originating spec link by slug (empty clears it)")
+	archSlug := fs.String("architecture", "", "set the originating architecture link by slug (empty clears it)")
+	dependsOn := fs.String("depends-on", "", "set the dependency ids (comma-separated; empty clears)")
+	body := fs.String("body", "", "set the body inline")
+	bodyFile := fs.String("body-file", "", "set the body from a file (takes precedence over --body)")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus ticket edit <epic-id> <ticket-id> [flags]\n\n"+
+			"Edit a ticket's metadata (title, status, priority, links, dependencies) or body.\n"+
+			"At least one edit flag is required. A non-empty --spec/--architecture must exist;\n"+
+			"passing them empty clears the link. The edit is validated before writing; an\n"+
+			"invalid edit is rejected and the existing file is left intact.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	ids, flags, err := splitTwoPositionals(args, "epic id", "ticket id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	epicID, ticketID := ids[0], ids[1]
+
+	logger := logging.New(stderr)
+
+	spec, code := buildTicketEditSpec(fs, *dir, *title, *status, *priority, *specSlug, *archSlug, *dependsOn, *body, *bodyFile, stderr)
+	if code != 0 {
+		return code
+	}
+	if spec.IsEmpty() {
+		fmt.Fprint(stderr, "daedalus: ticket edit requires at least one edit flag\n\n")
+		fs.Usage()
+		return 2
+	}
+
+	epicsRoot := epicsRootFor(*dir)
+	edited, err := backlog.EditTicket(epicsRoot, epicID, ticketID, spec)
+	if err != nil {
+		return reportBacklogEditError(stderr, logger, "ticket", ticketID, err)
+	}
+	logger.Info("ticket edited", "id", edited.ID, "epic", edited.EpicID)
+	fmt.Fprintf(stdout, "Edited ticket %q at %s.\n", edited.ID,
+		filepath.ToSlash(filepath.Join(epicsRoot, epicID, backlog.TicketsSubdir, ticketID, backlog.TicketFile)))
+	return 0
+}
+
+// runTicketRemove handles `daedalus ticket remove <epic-id> <ticket-id>`.
+func runTicketRemove(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("daedalus ticket remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("path", ".", "target repository directory whose .daedalus/epics/ holds the ticket")
+	fs.Usage = func() {
+		fmt.Fprint(stderr, "Usage: daedalus ticket remove <epic-id> <ticket-id> [--path .]\n\n"+
+			"Delete a ticket folder. The epic and sibling tickets are left intact.\n\nFlags:\n")
+		fs.PrintDefaults()
+	}
+	ids, flags, err := splitTwoPositionals(args, "epic id", "ticket id")
+	if err != nil {
+		fmt.Fprintf(stderr, "daedalus: %v\n\n", err)
+		fs.Usage()
+		return 2
+	}
+	if err := fs.Parse(flags); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	epicID, ticketID := ids[0], ids[1]
+
+	logger := logging.New(stderr)
+	epicsRoot := epicsRootFor(*dir)
+	if err := backlog.RemoveTicket(epicsRoot, epicID, ticketID); err != nil {
+		if errors.Is(err, backlog.ErrTicketNotFound) || !backlog.IsEpicID(epicID) || !backlog.IsTicketID(ticketID) {
+			fmt.Fprintf(stderr, "daedalus: %v\n", err)
+			return 2
+		}
+		logger.Error("ticket remove failed", "phase", "remove", "id", ticketID, "err", err)
+		fmt.Fprintf(stderr, "daedalus: ticket remove failed: %v\n", err)
+		return 1
+	}
+	logger.Info("ticket removed", "id", ticketID, "epic", epicID)
+	fmt.Fprintf(stdout, "Removed ticket %q from %s.\n", ticketID,
+		filepath.ToSlash(filepath.Join(epicsRoot, epicID, backlog.TicketsSubdir, ticketID)))
+	return 0
+}
+
+// --- backlog CLI helpers ---
+
+// buildEpicEditSpec assembles a backlog.EpicEditSpec from the parsed flags, using
+// fs.Visit so an explicit empty value is a deliberate change. A non-empty --spec/
+// --architecture is resolved and verified to exist; on a flag-level error it reports to
+// stderr and returns exit code 2. Returns (spec, 0) on success.
+func buildEpicEditSpec(fs *flag.FlagSet, dir, title, status, priority, specSlug, archSlug, dependsOn, body, bodyFile string, stderr io.Writer) (backlog.EpicEditSpec, int) {
+	var spec backlog.EpicEditSpec
+	set := visitedFlags(fs)
+
+	if set["title"] {
+		spec.SetTitle = true
+		spec.Title = title
+	}
+	if set["status"] {
+		spec.SetStatus = true
+		spec.Status = backlog.Status(status)
+	}
+	if set["priority"] {
+		spec.SetPriority = true
+		spec.Priority = backlog.Priority(priority)
+	}
+	if set["spec"] {
+		ref, code := resolveSpecLink(dir, specSlug, stderr)
+		if code != 0 {
+			return backlog.EpicEditSpec{}, code
+		}
+		spec.SetSpec = true
+		spec.Spec = ref
+	}
+	if set["architecture"] {
+		ref, code := resolveArchitectureLink(dir, archSlug, stderr)
+		if code != 0 {
+			return backlog.EpicEditSpec{}, code
+		}
+		spec.SetArchitecture = true
+		spec.Architecture = ref
+	}
+	if set["depends-on"] {
+		spec.SetDependsOn = true
+		spec.DependsOn = splitList(dependsOn)
+	}
+	if code := applyBodyEdit(set, body, bodyFile, stderr, &spec.SetBody, &spec.Body); code != 0 {
+		return backlog.EpicEditSpec{}, code
+	}
+	return spec, 0
+}
+
+// buildTicketEditSpec mirrors buildEpicEditSpec for tickets.
+func buildTicketEditSpec(fs *flag.FlagSet, dir, title, status, priority, specSlug, archSlug, dependsOn, body, bodyFile string, stderr io.Writer) (backlog.TicketEditSpec, int) {
+	var spec backlog.TicketEditSpec
+	set := visitedFlags(fs)
+
+	if set["title"] {
+		spec.SetTitle = true
+		spec.Title = title
+	}
+	if set["status"] {
+		spec.SetStatus = true
+		spec.Status = backlog.Status(status)
+	}
+	if set["priority"] {
+		spec.SetPriority = true
+		spec.Priority = backlog.Priority(priority)
+	}
+	if set["spec"] {
+		ref, code := resolveSpecLink(dir, specSlug, stderr)
+		if code != 0 {
+			return backlog.TicketEditSpec{}, code
+		}
+		spec.SetSpec = true
+		spec.Spec = ref
+	}
+	if set["architecture"] {
+		ref, code := resolveArchitectureLink(dir, archSlug, stderr)
+		if code != 0 {
+			return backlog.TicketEditSpec{}, code
+		}
+		spec.SetArchitecture = true
+		spec.Architecture = ref
+	}
+	if set["depends-on"] {
+		spec.SetDependsOn = true
+		spec.DependsOn = splitList(dependsOn)
+	}
+	if code := applyBodyEdit(set, body, bodyFile, stderr, &spec.SetBody, &spec.Body); code != 0 {
+		return backlog.TicketEditSpec{}, code
+	}
+	return spec, 0
+}
+
+// applyBodyEdit resolves the --body/--body-file pair into the SetBody/Body targets,
+// honoring the --body-file-wins precedence. Returns exit code 2 on a read failure.
+func applyBodyEdit(set map[string]bool, body, bodyFile string, stderr io.Writer, setBody *bool, bodyOut *string) int {
+	switch {
+	case set["body-file"]:
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return 2
+		}
+		*setBody = true
+		*bodyOut = string(b)
+	case set["body"]:
+		*setBody = true
+		*bodyOut = body
+	}
+	return 0
+}
+
+// resolveBody resolves the create-time --body/--body-file pair (body-file wins). Returns
+// (text, 0) on success or ("", 2) on a read failure (already reported).
+func resolveBody(body, bodyFile string, stderr io.Writer, logger *slog.Logger, op string) (string, int) {
+	if bodyFile != "" {
+		b, err := os.ReadFile(bodyFile)
+		if err != nil {
+			logger.Error(op+" rejected", "phase", "flags", "err", err)
+			fmt.Fprintf(stderr, "daedalus: reading --body-file: %v\n", err)
+			return "", 2
+		}
+		return string(b), 0
+	}
+	return body, 0
+}
+
+// resolveSpecLink translates an optional --spec slug into the stored reference
+// (<slug>.md), verifying the spec exists (friendly CLI check, as in 05-02). An empty slug
+// yields an empty reference (no link). Returns (ref, 0) on success or ("", 2) on error.
+func resolveSpecLink(dir, specSlug string, stderr io.Writer) (string, int) {
+	if strings.TrimSpace(specSlug) == "" {
+		return "", 0
+	}
+	if !specs.IsKebabCase(specSlug) {
+		fmt.Fprintf(stderr, "daedalus: --spec %q is not valid kebab-case\n", specSlug)
+		return "", 2
+	}
+	if !specExistsFor(dir, specSlug) {
+		fmt.Fprintf(stderr, "daedalus: spec %q not found in %s; capture it first or omit --spec\n",
+			specSlug, filepath.ToSlash(filepath.Join(workspace.Name, specs.SpecsDir)))
+		return "", 2
+	}
+	return specSlug + specs.FileExt, 0
+}
+
+// resolveArchitectureLink translates an optional --architecture slug into the stored
+// reference (<slug>.md), verifying the document exists. Mirrors resolveSpecLink.
+func resolveArchitectureLink(dir, archSlug string, stderr io.Writer) (string, int) {
+	if strings.TrimSpace(archSlug) == "" {
+		return "", 0
+	}
+	if !architecture.IsKebabCase(archSlug) {
+		fmt.Fprintf(stderr, "daedalus: --architecture %q is not valid kebab-case\n", archSlug)
+		return "", 2
+	}
+	path := filepath.Join(dir, workspace.Name, architecture.ArchitectureDir, archSlug+architecture.FileExt)
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		fmt.Fprintf(stderr, "daedalus: architecture document %q not found in %s; create it first or omit --architecture\n",
+			archSlug, filepath.ToSlash(filepath.Join(workspace.Name, architecture.ArchitectureDir)))
+		return "", 2
+	}
+	return archSlug + architecture.FileExt, 0
+}
+
+// reportBacklogEditError maps an epic/ticket edit error to a consistent message and exit
+// code: not-found and schema-invalid are usage errors (2); malformed and I/O are 1.
+func reportBacklogEditError(stderr io.Writer, logger *slog.Logger, kind, id string, err error) int {
+	switch {
+	case errors.Is(err, backlog.ErrEpicNotFound), errors.Is(err, backlog.ErrTicketNotFound):
+		logger.Error(kind+" edit rejected", "phase", "load", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		fmt.Fprintf(stderr, "the %s must already exist; create it first\n", kind)
+		return 2
+	case errors.Is(err, backlog.ErrMalformed):
+		logger.Error(kind+" edit failed", "phase", "load", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %v\n", err)
+		return 1
+	case isBacklogInvalid(err):
+		logger.Error(kind+" edit rejected", "phase", "validate", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %s %q is invalid; the edit was not applied:\n", kind, id)
+		writeBacklogSchemaErrors(stderr, err)
+		return 2
+	default:
+		logger.Error(kind+" edit failed", "phase", "write", "id", id, "err", err)
+		fmt.Fprintf(stderr, "daedalus: %s edit failed: %v\n", kind, err)
+		return 1
+	}
+}
+
+// visitedFlags returns the set of flag names the user actually passed, so an explicit
+// empty value is distinguishable from an unset flag.
+func visitedFlags(fs *flag.FlagSet) map[string]bool {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	return set
+}
+
+// hasHelp reports whether the flag tokens include a help request, so a multi-positional
+// operation can show usage without first failing the positional-count check.
+func hasHelp(flags []string) bool {
+	for _, f := range flags {
+		if f == "-h" || f == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+// splitSinglePositional extracts exactly one positional (named noun for errors) plus the
+// flag tokens, allowing a help token without a positional.
+func splitSinglePositional(args []string, noun string) (string, []string, error) {
+	positionals, flags := splitPositionals(args)
+	if hasHelp(flags) {
+		return "", flags, nil
+	}
+	switch len(positionals) {
+	case 1:
+		return positionals[0], flags, nil
+	case 0:
+		return "", flags, fmt.Errorf("this operation requires exactly one %s", noun)
+	default:
+		return "", flags, fmt.Errorf("this operation requires exactly one %s, got %d", noun, len(positionals))
+	}
+}
+
+// splitTwoPositionals extracts exactly two positionals (named for errors) plus the flag
+// tokens, allowing a help token without positionals.
+func splitTwoPositionals(args []string, first, second string) ([2]string, []string, error) {
+	positionals, flags := splitPositionals(args)
+	if hasHelp(flags) {
+		return [2]string{}, flags, nil
+	}
+	if len(positionals) != 2 {
+		return [2]string{}, flags, fmt.Errorf("this operation requires exactly a %s and a %s", first, second)
+	}
+	return [2]string{positionals[0], positionals[1]}, flags, nil
+}
+
+// joinBacklogStatuses / joinBacklogPriorities render the closed metadata sets for CLI
+// help, so the values a user sees in help match the validator's set exactly.
+func joinBacklogStatuses() string {
+	parts := make([]string, 0)
+	for _, s := range backlog.Statuses() {
+		parts = append(parts, string(s))
+	}
+	return strings.Join(parts, "|")
+}
+
+func joinBacklogPriorities() string {
+	parts := make([]string, 0)
+	for _, p := range backlog.Priorities() {
+		parts = append(parts, string(p))
+	}
+	return strings.Join(parts, "|")
+}
+
+// isBacklogInvalid reports whether err is (or wraps) a *backlog.ValidationError.
+func isBacklogInvalid(err error) bool {
+	var ve *backlog.ValidationError
+	return errors.As(err, &ve)
+}
+
+// writeBacklogSchemaErrors renders a backlog validation failure as actionable lines, one
+// finding per line, so the user can fix every problem in one pass.
+func writeBacklogSchemaErrors(w io.Writer, err error) {
+	var ve *backlog.ValidationError
+	if !errors.As(err, &ve) {
+		fmt.Fprintf(w, "  - %v\n", err)
+		return
+	}
+	for _, se := range ve.Errors {
+		fmt.Fprintf(w, "  - %s: observed %s; expected %s\n", se.Field, se.Observed, se.Expected)
+	}
+}
+
 // writePreview renders, on stdout, the directories and root artifacts a plan
 // would create. It lists nothing for an already-complete workspace so an
 // idempotent re-run produces an explicit "nothing to update" preview.
@@ -3086,6 +4041,12 @@ var valueFlags = map[string]struct{}{
 	// harmless since a flag a given operation does not define simply never appears in
 	// its args.
 	"-spec": {}, "--spec": {},
+	// backlog (epic/ticket) value flags. Listed here too because the epic/ticket
+	// subcommands share splitPositionals; over-listing is harmless.
+	"-status": {}, "--status": {},
+	"-priority": {}, "--priority": {},
+	"-architecture": {}, "--architecture": {},
+	"-epic": {}, "--epic": {},
 }
 
 // splitPositionals separates the positional tokens from the flag tokens in an
