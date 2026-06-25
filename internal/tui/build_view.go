@@ -77,37 +77,35 @@ type buildKeyMap struct {
 	Quit    key.Binding
 }
 
+// defaultBuildKeyMap derives the build preview's bindings. The build preview is a
+// standalone program (`daedalus build`), not part of the six-area shell, but it must
+// still honor the project-wide rule "same action ⇒ same key" (07-03/R2). So its
+// shared actions (scroll/jump/help/quit) reuse the KEYS from the central registry
+// (keybindings.go) — only the context-specific HELP wording differs (e.g. "prev
+// artifact" vs "up"). The confirm/cancel gate is the build-specific pair this screen
+// adds; it is intentionally NOT in the shell registry because confirm-write is unique
+// to this flow. A test (TestBuildPreviewSharesRegistryKeys) locks the shared keys to
+// the registry so they can never drift.
 func defaultBuildKeyMap() buildKeyMap {
+	reg := defaultKeymap()
+	// withDesc clones a registry binding's KEYS but gives it build-context help text,
+	// so the key is the registry's (consistent) while the wording fits this screen.
+	withDesc := func(a keyAction, helpKey, helpDesc string) key.Binding {
+		return key.NewBinding(
+			key.WithKeys(reg.binding(a).Keys()...),
+			key.WithHelp(helpKey, helpDesc),
+		)
+	}
 	return buildKeyMap{
-		Up: key.NewBinding(
-			key.WithKeys("up", "k"),
-			key.WithHelp("↑/k", "prev artifact"),
-		),
-		Down: key.NewBinding(
-			key.WithKeys("down", "j"),
-			key.WithHelp("↓/j", "next artifact"),
-		),
-		// Diff scrolling reuses the browser's paging keys so a long diff scrolls the
-		// same way the prompt preview does.
-		PgUp: key.NewBinding(
-			key.WithKeys("pgup", "b"),
-			key.WithHelp("pgup", "scroll diff up"),
-		),
-		PgDn: key.NewBinding(
-			key.WithKeys("pgdown", "f", " "),
-			key.WithHelp("pgdn", "scroll diff down"),
-		),
-		Top: key.NewBinding(
-			key.WithKeys("home", "g"),
-			key.WithHelp("g", "diff top"),
-		),
-		Botom: key.NewBinding(
-			key.WithKeys("end", "G"),
-			key.WithHelp("G", "diff bottom"),
-		),
-		// y/enter confirm the write; n/esc cancel it. This pair is the conventional
-		// yes/no gate and is consistent with esc-goes-back used elsewhere — here esc
-		// "backs out" of the build (cancel) rather than navigating a sub-screen.
+		Up:    withDesc(actionUp, "↑/k", "prev artifact"),
+		Down:  withDesc(actionDown, "↓/j", "next artifact"),
+		PgUp:  withDesc(actionPageUp, "pgup", "scroll diff up"),
+		PgDn:  withDesc(actionPageDown, "pgdn", "scroll diff down"),
+		Top:   withDesc(actionTop, "g", "diff top"),
+		Botom: withDesc(actionBottom, "G", "diff bottom"),
+		// y/enter confirm the write; n/esc cancel it. This build-specific gate is the
+		// conventional yes/no pair; esc here "backs out" of the build (cancel),
+		// consistent with esc-goes-back elsewhere.
 		Confirm: key.NewBinding(
 			key.WithKeys("y", "enter"),
 			key.WithHelp("y", "confirm & write"),
@@ -116,14 +114,8 @@ func defaultBuildKeyMap() buildKeyMap {
 			key.WithKeys("n", "esc"),
 			key.WithHelp("n/esc", "cancel"),
 		),
-		Help: key.NewBinding(
-			key.WithKeys("?"),
-			key.WithHelp("?", "toggle help"),
-		),
-		Quit: key.NewBinding(
-			key.WithKeys("q", "ctrl+c"),
-			key.WithHelp("q", "quit"),
-		),
+		Help: reg.binding(actionHelp),
+		Quit: reg.binding(actionQuit),
 	}
 }
 

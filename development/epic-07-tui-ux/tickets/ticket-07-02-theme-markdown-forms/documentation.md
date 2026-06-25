@@ -1,31 +1,16 @@
-# Theme, Markdown & Forms — Usage Guide
+# Documentation — Theme, Markdown & Forms
 
-_Authored and maintained by C-3PO, technical writer for Daedalus._
+The user-facing guide for this feature lives in the product manual, not here.
 
-## Overview
+**Chapter:** [Navigating the interface](../../../../docs/guide/navigating-the-tui.md)
+(`docs/guide/navigating-the-tui.md`)
 
-_To be completed by C-3PO after implementation._
+This ticket's behavior is documented there in these sections:
 
-## How to use
-
-Daedalus presents a polished, consistent interface across all areas:
-
-- **Visual theme** — a coherent set of colors and styles is applied throughout, so headers, selections, borders and state messages look consistent everywhere.
-- **Markdown rendering** — documents (specs, prompts, documentation) are shown rendered and readable in the terminal, with formatted headings, lists, tables, code blocks and emphasis.
-- **Forms** — when Daedalus needs input, it shows a form. Fill in the fields, submit, or cancel. Invalid input is flagged with a clear error message before the form is accepted.
-
-## Options / flags (keyboard shortcuts)
-
-| Shortcut | Action |
-|---|---|
-| _TBD_ | Move between form fields |
-| _TBD_ | Submit the form |
-| _TBD_ | Cancel the form |
-| _TBD_ | Scroll a rendered markdown view |
-
-_Exact key assignments to be confirmed by C-3PO after implementation (see ticket-07-03 for the keybinding system)._
-
-## Notes & limitations
-
-- Phase 1: Daedalus configures the AI structure; it does not execute agents.
-- Markdown rendering targets readability in a terminal; exact appearance depends on your terminal's color support.
+- [Reading documents](../../../../docs/guide/navigating-the-tui.md#reading-documents)
+  — specs, prompts, architecture, and epics shown as rendered Markdown.
+- [Filtering a list](../../../../docs/guide/navigating-the-tui.md#filtering-a-list)
+  — open with `/`, apply with `enter`, cancel with `esc`, the active-filter
+  banner, and the no-matches state.
+- [A consistent look](../../../../docs/guide/navigating-the-tui.md#a-consistent-look)
+  — the shared visual language across areas and states.
