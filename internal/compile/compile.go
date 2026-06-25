@@ -28,13 +28,44 @@ import "github.com/Codigo-de-Altura/Daedalus/internal/catalog"
 // `.daedalus/` and validated before any Compiler sees it (so a Compiler never has
 // to defend against an invalid definition).
 //
-// Today it carries the agents; prompts, workflows and the SDD backlog are
-// additive fields a later ticket can add without breaking the contract, because
-// a Compiler reads only the fields it maps.
+// It carries the canonical pieces a Compiler maps. Fields are additive: workflows
+// and the SDD backlog can be added later without breaking the contract, because a
+// Compiler reads only the fields it maps.
+//
+// Every field is pre-resolved and pure data: Compile performs no I/O (RNF-5), so
+// anything that needs the filesystem — loading agents, composing a prompt's
+// inclusions — happens once here, in LoadDefinition, not inside a Compiler.
 type Definition struct {
 	// Agents are the canonical agents in deterministic, id-sorted order so a
 	// Compiler that iterates them emits artifacts in a stable order (RNF-5).
 	Agents []catalog.Agent
+	// Commands are the canonical commands in deterministic, id-sorted order. They
+	// are sourced from the workspace prompts (`.daedalus/prompts/`): each prompt is
+	// a command whose body is its fully composed text (inclusions already expanded
+	// by LoadDefinition via prompts.Resolve), so a Compiler sees self-contained,
+	// pure data and never touches the filesystem.
+	Commands []Command
+}
+
+// Command is the canonical, backend-agnostic model of a command a Compiler maps
+// to its native form (e.g. a Claude Code slash command). It is derived from a
+// workspace prompt: the id and a human-facing description, plus the fully
+// composed body. Keeping it a small, purpose-built type (rather than reusing
+// prompts.Prompt) means this package does not leak the prompts on-disk model into
+// the Compiler contract, and a Command already carries the *resolved* body so the
+// Compiler is pure.
+type Command struct {
+	// ID is the command's stable kebab-case identifier (the prompt id). It is both
+	// the native file base name and the command's identity, so it must be
+	// filesystem-safe — kebab-case guarantees that (REQ-9).
+	ID string
+	// Description is the human-facing one-line summary (the prompt title). It may
+	// be empty, in which case a Compiler omits it from any frontmatter.
+	Description string
+	// Body is the command's fully composed text: the prompt body with every
+	// inclusion already expanded (prompts.Resolve), so the emitted command is
+	// self-contained and deterministic regardless of how it was authored.
+	Body string
 }
 
 // Artifact is a single native file a Compiler wants written: its path relative

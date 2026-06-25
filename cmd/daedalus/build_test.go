@@ -73,22 +73,28 @@ func TestRunBuildInvalidDefinition(t *testing.T) {
 	}
 }
 
-// TestRunBuildNotYetImplementedAdapter documents the 06-01/06-02 boundary at the
-// CLI: with a valid workspace the build routes to the claude stub, which reports
-// it is not implemented — a compile error (not a validation error).
-func TestRunBuildNotYetImplementedAdapter(t *testing.T) {
+// TestRunBuildCompilesClaudeArtifacts covers the happy path at the CLI: with a
+// valid workspace the build routes to the Claude Code adapter, writes `.claude/`
+// artifacts, exits 0, and prints a summary naming the backend (REQ-7).
+func TestRunBuildCompilesClaudeArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	scaffold(t, dir)
 	if code, _, stderr := runAgentCmd("add", "analyst", "--path", dir); code != 0 {
 		t.Fatalf("agent add failed (%d): %s", code, stderr)
 	}
 
-	code, _, stderr := runBuildInDir(dir)
-	if code != exitBuildCompile {
-		t.Fatalf("exit code = %d, want %d (compile); stderr:\n%s", code, exitBuildCompile, stderr)
+	code, stdout, stderr := runBuildInDir(dir)
+	if code != exitBuildOK {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", code, stderr)
 	}
-	if !strings.Contains(stderr, "build failed") {
-		t.Errorf("stderr does not read as a build failure: %s", stderr)
+	if !strings.Contains(stdout, "claude-code") {
+		t.Errorf("summary does not name the backend; got:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude", "agents", "analyst.md")); err != nil {
+		t.Errorf("agent artifact not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude", "settings.json")); err != nil {
+		t.Errorf("settings.json not written: %v", err)
 	}
 }
 

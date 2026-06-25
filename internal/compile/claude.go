@@ -1,34 +1,25 @@
 package compile
 
 import (
-	"errors"
-
 	"github.com/Codigo-de-Altura/Daedalus/internal/workspace"
 )
 
-// ErrNotImplemented is the sentinel a not-yet-completed Compiler returns from
-// Compile. The orchestrator maps it to a compilation error (a non-validation,
-// non-I/O failure) so the exit code and message are honest: the build did not
-// fabricate artifacts, it stopped because the adapter cannot yet produce them.
-// ticket-06-02 removes this from the Claude Code adapter once the real mapping
-// lands.
-var ErrNotImplemented = errors.New("backend adapter not yet implemented")
-
-// claudeCompiler is the Claude Code adapter — the MVP's first and only backend
-// (PRD D3). It is registered in DefaultRegistry so the build command already
-// routes "claude-code" here through the registry: the surface, the routing, the
-// validation-before-write and the exit codes are all live and testable today.
+// claudeCompiler is the Claude Code adapter — the MVP's first backend (PRD D3).
+// It is registered in DefaultRegistry so the build command routes "claude-code"
+// here through the registry; the surface, the routing, the validate-before-write
+// gate and the exit codes are owned by ticket-06-01, and this type owns the
+// canonical → `.claude/` mapping (RF-6.2).
 //
-// The canonical → `.claude/` mapping itself (frontmatter agents, commands,
-// settings) is ticket-06-02's deliverable. Until then Compile is a deliberate,
-// clearly-marked stub that returns ErrNotImplemented rather than inventing
-// artifacts: a half-real mapping would be worse than an explicit "not yet". The
-// type, its registration and its Backend() are the stable parts 06-02 keeps; only
-// the body of Compile is filled in.
+// Compile is a pure function of its Definition (no I/O): every filesystem read —
+// loading agents, composing a prompt's inclusions into a command body — already
+// happened in LoadDefinition, so the mapping is deterministic and the same
+// canonical input yields byte-identical artifacts (RNF-5). The non-destructive
+// write strategy (RF-6.3) and the diff/preview (RF-6.4) consume the pure
+// Artifacts this returns; they are not this adapter's concern.
 type claudeCompiler struct{}
 
 // newClaudeCompiler constructs the Claude Code adapter. It is a function (not a
-// bare literal) so 06-02 can give the adapter configuration/dependencies without
+// bare literal) so the adapter can later take configuration/dependencies without
 // changing its call sites in the registry.
 func newClaudeCompiler() *claudeCompiler {
 	return &claudeCompiler{}
@@ -41,12 +32,40 @@ func (c *claudeCompiler) Backend() string {
 	return workspace.DefaultBackend
 }
 
-// Compile is the canonical → Claude Code mapping. It is intentionally unfinished:
-// it returns ErrNotImplemented (RF-6.2 territory) so the orchestration around it
-// — routing, the validate-before-write gate, the differentiated exit codes — can
-// be exercised today without a half-built mapping masquerading as success. The
-// _ = def keeps the parameter named for the signature 06-02 implements against.
+// Compile maps the validated canonical Definition to Claude Code's native
+// `.claude/` artifacts (RF-6.2). It emits, in a FIXED order so the output is
+// deterministic and any diff is stable (RNF-5):
+//
+//  1. one `.claude/agents/<id>.md` per agent (frontmatter + prompt), id-sorted;
+//  2. one `.claude/commands/<id>.md` per command (optional frontmatter + composed
+//     body), id-sorted;
+//  3. a single `.claude/settings.json` — a minimal, honest managed marker.
+//
+// The Definition already delivers agents and commands in id-sorted order
+// (LoadDefinition), so iterating them preserves that order. File names are
+// kebab-case, derived directly from the canonical id (REQ-9), so they are stable
+// across runs. Compile performs no I/O and never fails for the MVP mapping (the
+// inputs are pre-validated), but it keeps the error return for adapters/extensions
+// whose mapping can genuinely fail.
 func (c *claudeCompiler) Compile(def Definition) (Artifacts, error) {
-	_ = def
-	return Artifacts{}, ErrNotImplemented
+	arts := Artifacts{Backend: c.Backend()}
+
+	for _, a := range def.Agents {
+		arts.Files = append(arts.Files, Artifact{
+			RelPath: claudeAgentsDir + "/" + a.ID + mdExt,
+			Content: renderAgent(a),
+		})
+	}
+	for _, cmd := range def.Commands {
+		arts.Files = append(arts.Files, Artifact{
+			RelPath: claudeCommandsDir + "/" + cmd.ID + mdExt,
+			Content: renderCommand(cmd),
+		})
+	}
+	arts.Files = append(arts.Files, Artifact{
+		RelPath: claudeSettingsPath,
+		Content: renderSettings(),
+	})
+
+	return arts, nil
 }

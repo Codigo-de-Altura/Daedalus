@@ -208,18 +208,24 @@ func TestBuildIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestClaudeStubReportsNotImplemented documents the 06-01/06-02 boundary: the
-// real default registry routes claude-code to a stub that honestly reports it is
-// not implemented yet (a compile error, never a fake success).
-func TestClaudeStubReportsNotImplemented(t *testing.T) {
+// TestBuildDefaultRegistryWritesClaudeArtifacts verifies the real Claude Code
+// adapter (DefaultRegistry) produces and writes `.claude/` artifacts for a valid
+// workspace end-to-end (no fake compiler).
+func TestBuildDefaultRegistryWritesClaudeArtifacts(t *testing.T) {
 	root := initWorkspace(t)
 	addAgent(t, root, "analyst")
 
-	_, err := Build(Options{Root: root}) // DefaultRegistry → claude stub
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("err = %v, want ErrNotImplemented from the claude stub", err)
+	out, err := Build(Options{Root: root}) // DefaultRegistry → real claude adapter
+	if err != nil {
+		t.Fatalf("Build: %v", err)
 	}
-	if IsDefinitionInvalid(err) {
-		t.Errorf("the not-implemented stub was misclassified as a validation error: %v", err)
+	if len(out.Backends) != 1 {
+		t.Fatalf("backends = %d, want 1", len(out.Backends))
+	}
+	// At least the agent file and settings.json must exist.
+	for _, rel := range []string{".claude/agents/analyst.md", ".claude/settings.json"} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			t.Errorf("expected artifact %s not written: %v", rel, err)
+		}
 	}
 }

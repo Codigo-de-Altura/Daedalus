@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/Codigo-de-Altura/Daedalus/internal/catalog"
+	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
 	"github.com/Codigo-de-Altura/Daedalus/internal/workspace"
 )
 
@@ -80,23 +82,37 @@ func plural(n int) string {
 // backend concern, surfaced by its Compiler, not a property of the canonical
 // definition.
 func LoadDefinition(root string) (Definition, error) {
-	agentsRoot := filepath.Join(root, workspace.Name, catalog.AgentsDir)
-
-	ids, err := agentIDs(agentsRoot)
-	if err != nil {
-		// A missing agents directory means there is simply nothing to load (the
-		// workspace presence check is the command's job, REQ-2); any other I/O error
-		// is a real failure the caller surfaces.
-		if errors.Is(err, fs.ErrNotExist) {
-			return Definition{}, nil
-		}
-		return Definition{}, err
-	}
-
 	var (
 		def    Definition
 		defErr DefinitionError
 	)
+
+	if err := loadAgents(root, &def, &defErr); err != nil {
+		return Definition{}, err
+	}
+	if err := loadCommands(root, &def, &defErr); err != nil {
+		return Definition{}, err
+	}
+
+	if len(defErr.Malformed) > 0 || len(defErr.Invalid) > 0 {
+		return Definition{}, &defErr
+	}
+	return def, nil
+}
+
+// loadAgents reads and validates the canonical agents into def, appending any
+// per-source problem to defErr. A real I/O error (other than a missing agents
+// directory, which simply means "no agents") is returned so the caller surfaces
+// it rather than treating it as a validation problem.
+func loadAgents(root string, def *Definition, defErr *DefinitionError) error {
+	agentsRoot := filepath.Join(root, workspace.Name, catalog.AgentsDir)
+	ids, err := subdirIDs(agentsRoot)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // no agents directory ⇒ nothing to load
+		}
+		return err
+	}
 	for _, id := range ids {
 		a, err := catalog.Load(agentsRoot, id)
 		if err != nil {
@@ -109,20 +125,57 @@ func LoadDefinition(root string) (Definition, error) {
 		}
 		def.Agents = append(def.Agents, a)
 	}
-
-	if len(defErr.Malformed) > 0 || len(defErr.Invalid) > 0 {
-		return Definition{}, &defErr
-	}
-	return def, nil
+	return nil
 }
 
-// agentIDs lists the agent ids materialized under agentsRoot — the subdirectories,
-// in sorted order — so loading is deterministic. Non-directory entries are
-// ignored (the layout puts each agent in its own directory, catalog.AgentsDir),
-// so a stray loose file never derails the build. A directory whose name is not
-// valid kebab-case is skipped here and would be caught by catalog.Load if it were
-// a real agent; we do not invent ids.
-func agentIDs(agentsRoot string) ([]string, error) {
+// loadCommands reads the canonical prompts and turns each into a Command whose
+// body is fully composed (inclusions expanded via prompts.Resolve), so the
+// Compiler sees self-contained, deterministic data. A prompt that fails to load
+// or whose inclusions cannot be resolved is recorded as a malformed source so the
+// build aborts before writing (validate-before-write), naming the exact prompt.
+//
+// Unlike prompts.List — which silently skips a corrupt file to keep `list`
+// usable — the build must be honest about every problem, so we enumerate the ids
+// ourselves and surface each failure instead of hiding it.
+func loadCommands(root string, def *Definition, defErr *DefinitionError) error {
+	promptsRoot := filepath.Join(root, workspace.Name, prompts.PromptsDir)
+	ids, err := promptIDs(promptsRoot)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // no prompts directory ⇒ no commands
+		}
+		return err
+	}
+	for _, id := range ids {
+		p, err := prompts.Load(promptsRoot, id)
+		if err != nil {
+			defErr.Malformed = append(defErr.Malformed, SourceError{ID: id, Err: err})
+			continue
+		}
+		// Compose the body so the emitted command is self-contained: an unresolved
+		// inclusion (missing reference or cycle) is a definition problem, not a
+		// silent partial command.
+		body, err := prompts.Resolve(promptsRoot, id)
+		if err != nil {
+			defErr.Malformed = append(defErr.Malformed, SourceError{ID: id, Err: err})
+			continue
+		}
+		def.Commands = append(def.Commands, Command{
+			ID:          p.ID,
+			Description: p.Title,
+			Body:        body,
+		})
+	}
+	return nil
+}
+
+// subdirIDs lists the agent ids materialized under agentsRoot — the
+// subdirectories, in sorted order — so loading is deterministic. Non-directory
+// entries are ignored (the layout puts each agent in its own directory,
+// catalog.AgentsDir), so a stray loose file never derails the build. A directory
+// whose name is not valid kebab-case is skipped here and would be caught by
+// catalog.Load if it were a real agent; we do not invent ids.
+func subdirIDs(agentsRoot string) ([]string, error) {
 	entries, err := os.ReadDir(agentsRoot)
 	if err != nil {
 		return nil, err
@@ -133,6 +186,36 @@ func agentIDs(agentsRoot string) ([]string, error) {
 			continue
 		}
 		ids = append(ids, e.Name())
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// promptIDs lists the prompt ids under promptsRoot — the base names of the flat
+// `<id>.md` files, in sorted order — so command loading is deterministic. Unlike
+// agents (one directory each), prompts live flat (prompts.PromptsDir), keyed by
+// id. Directories and non-`.md` files are ignored; a base name that is not valid
+// kebab-case is skipped (it is not one of ours), matching prompts.List's identity
+// rule without importing its body.
+func promptIDs(promptsRoot string) ([]string, error) {
+	entries, err := os.ReadDir(promptsRoot)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, prompts.FileExt) {
+			continue
+		}
+		id := strings.TrimSuffix(name, prompts.FileExt)
+		if !prompts.IsKebabCase(id) {
+			continue
+		}
+		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	return ids, nil

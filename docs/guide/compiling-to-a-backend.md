@@ -110,23 +110,121 @@ script or CI:
 
 `build` compiles your canonical `.daedalus/` definition into the native format of
 the backend recorded in `daedalus.yaml`. The build is **deterministic**: the same
-workspace always produces the same result.
+`.daedalus/` always produces the same output, byte for byte. File names are in
+**kebab-case**, derived from each item's canonical id, and stay stable from one
+build to the next.
 
-> The exact native artifacts generated for Claude Code — the mapping from your
-> canonical definition to the files Claude Code reads — are documented together
-> with the Claude Code adapter, in a forthcoming section of this chapter. This
-> release establishes the `build`/`sync` command itself: its flags, its
-> validate-first safety behavior, and its exit codes.
+You keep editing the clean, backend-agnostic definition in `.daedalus/`, and
+Daedalus generates the native files for you — you never hand-edit the generated
+output to keep it in sync.
+
+### The Claude Code backend → `.claude/`
+
+When `daedalus.yaml` targets **Claude Code**, `build` writes the `.claude/`
+structure that Claude Code reads:
+
+```
+.claude/
+  agents/
+    <agent-id>.md       # one file per canonical agent
+  commands/
+    <prompt-id>.md      # one file per workspace prompt (your slash commands)
+  settings.json         # a minimal, Daedalus-managed settings file
+```
+
+#### Agents → `.claude/agents/<id>.md`
+
+Each agent in your workspace becomes one Markdown file under `.claude/agents/`.
+The file has a small **frontmatter** block followed by the agent's prompt as its
+body. The frontmatter carries:
+
+- `name` — the agent's canonical id;
+- `description` — the agent's role;
+- `model` — included **only** when the agent defines that parameter.
+
+For an agent whose id is `reviewer`, role is `Reviews code changes`, and prompt
+is its body, `build` generates:
+
+```md
+---
+name: reviewer
+description: Reviews code changes
+model: opus
+---
+You are the code reviewer. Inspect the proposed changes and report any
+correctness, security, or style issues, worst-first.
+```
+
+> Daedalus writes only what your canonical definition actually specifies. In this
+> release the agent frontmatter does **not** include `tools` or `color` — they are
+> not generated.
+
+#### Prompts → `.claude/commands/<id>.md` (your slash commands)
+
+In Claude Code, the files under `.claude/commands/` are its **slash commands**.
+Daedalus builds them from the **prompts** in your workspace: **every prompt in
+`.daedalus/prompts/`** — both `global` and `shared` prompts — is compiled into one
+command file. This is the key correspondence to keep in mind:
+
+> **A workspace prompt becomes a Claude Code slash command.** Author a prompt
+> once in `.daedalus/prompts/`, and after a build you can invoke it as a slash
+> command in Claude Code.
+
+Each command file's name derives from the prompt's id. Its frontmatter carries a
+single key, `description`, set to the prompt's **title** — and that key is
+**omitted entirely** when the prompt has no title. The body is the **resolved**
+prompt: any inclusions the prompt references are already expanded inline, so the
+command is self-contained.
+
+For a prompt with id `summarize` and title `Summarize a document`, `build`
+generates:
+
+```md
+---
+description: Summarize a document
+---
+Summarize the document below in five bullet points, then give a one-line
+takeaway.
+```
+
+#### Settings → `.claude/settings.json`
+
+`build` writes a **minimal, honest** `settings.json`. It contains the official
+Claude Code `$schema` and a `daedalus` marker noting that these files are managed
+by Daedalus — nothing more:
+
+```json
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "daedalus": {
+    "managed": true,
+    "generator": "daedalus"
+  }
+}
+```
+
+Daedalus deliberately does **not** fabricate `permissions`, `env`, `hooks`, or a
+`model` here — it never writes configuration you did not define yourself. You stay
+in control of those settings.
 
 ## Notes & limitations
 
-- **Deterministic.** The same workspace state always produces the same result.
+- **Deterministic.** The same workspace state always produces the same output,
+  byte for byte, with stable, kebab-case file names derived from canonical ids.
 - **Validate-first, all-or-nothing.** If the workspace is missing, the canonical
   definition is invalid, or the configured backend has no adapter, `build` aborts
   and writes nothing — your repository is left untouched.
 - **Backend comes from the manifest.** `build` compiles to whatever backend is
   recorded in `daedalus.yaml`; set it with `daedalus init --backend` (see
-  [Choosing a backend](initializing-a-workspace.md#choosing-a-backend)).
+  [Choosing a backend](initializing-a-workspace.md#choosing-a-backend)). Claude
+  Code is the implemented backend in this release.
+- **Prompts are your slash commands.** Every prompt in `.daedalus/prompts/`
+  (global and shared) is compiled into a Claude Code slash command under
+  `.claude/commands/`.
+- **Daedalus generates only what you defined.** The Claude Code settings file is
+  intentionally minimal — Daedalus never writes `permissions`, `env`, `hooks`, or
+  a default `model` you did not specify, and agent frontmatter omits `tools` and
+  `color`.
 - **Phase 1: Daedalus configures the AI structure; it does not execute agents.**
   After building, you run the agents yourself in your chosen backend (for
   example, Claude Code).
