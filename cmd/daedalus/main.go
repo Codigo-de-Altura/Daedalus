@@ -27,6 +27,7 @@ import (
 	"github.com/Codigo-de-Altura/Daedalus/internal/catalog"
 	"github.com/Codigo-de-Altura/Daedalus/internal/compile"
 	"github.com/Codigo-de-Altura/Daedalus/internal/conventions"
+	"github.com/Codigo-de-Altura/Daedalus/internal/linters"
 	"github.com/Codigo-de-Altura/Daedalus/internal/logging"
 	"github.com/Codigo-de-Altura/Daedalus/internal/prompts"
 	"github.com/Codigo-de-Altura/Daedalus/internal/specs"
@@ -4390,11 +4391,14 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	dir := fs.String("path", ".", "target repository directory whose .daedalus/ workspace is validated")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, "Usage: daedalus validate [--path .]\n\n"+
-			"Validate the .daedalus/ workspace against the team conventions: kebab-case and\n"+
-			"id patterns (epic-NN-<slug>, ticket-NN-MM-<slug>), the canonical directory\n"+
-			"layout, YAML/Markdown format, and spec -> epic -> ticket traceability. It reports\n"+
-			"violations with their location; it never edits or auto-fixes. Exit 0 if there are\n"+
-			"no errors, 1 if there are, 2 on a usage error.\n\nFlags:\n")
+			"Validate the .daedalus/ workspace on two axes, reporting (never fixing):\n"+
+			"  - team conventions (RF-8.3): kebab-case and id patterns (epic-NN-<slug>,\n"+
+			"    ticket-NN-MM-<slug>), the canonical directory layout, YAML/Markdown format,\n"+
+			"    and spec -> epic -> ticket traceability;\n"+
+			"  - definition linters (RF-9.3): the canonical agent, workflow (DAG) and\n"+
+			"    manifest definitions against their schemas (required fields, DAG cycles,\n"+
+			"    missing artifacts, unknown agents, unsupported backends).\n"+
+			"Exit 0 if there are no errors, 1 if there are, 2 on a usage error.\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -4405,6 +4409,7 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	}
 
 	logger := logging.New(stderr)
+	logger.Info("validation started", "phase", "scan", "path", filepath.ToSlash(*dir))
 
 	report, err := conventions.WorkspaceUnder(*dir).Validate()
 	if err != nil {
@@ -4413,30 +4418,127 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	errs, warns := report.Counts()
-	logger.Info("workspace validated", "errors", errs, "warnings", warns, "conformant", report.Conformant())
-
-	if report.Conformant() && warns == 0 {
-		fmt.Fprintln(stdout, "Workspace conforms to the conventions (no violations).")
-		return 0
+	// Definition linters (RF-9.3) run alongside the conventions check: they validate
+	// the canonical agent/workflow/manifest definitions against their schemas. They
+	// share the same "validation command" surface (per the epic) and the same
+	// exit-code contract, so CI gates one command for both axes.
+	lintReport, err := linters.WorkspaceUnder(*dir).Lint()
+	if err != nil {
+		logger.Error("validate failed", "phase", "lint", "err", err)
+		fmt.Fprintf(stderr, "daedalus: validate failed: %v\n", err)
+		return 2
 	}
 
+	// Emit one decision-point event per finding (CA3, mirroring 09-01): which
+	// definition/location was evaluated, its family and the rule it broke, and the
+	// reason — at warn for advisories and error for hard violations, so the trace
+	// reconstructs every rejection without re-running the command. Reasons are the
+	// validators' own structured text; they never carry file contents or secrets.
+	logFindings(logger, report.Findings)
+	logLintFindings(logger, lintReport.Findings)
+
+	cErrs, cWarns := report.Counts()
+	lErrs, lWarns := lintReport.Counts()
+	logger.Info("workspace validated",
+		"convention_errors", cErrs, "convention_warnings", cWarns,
+		"definition_errors", lErrs, "definition_warnings", lWarns,
+		"conformant", report.Conformant() && lintReport.Clean())
+
+	writeConventionsSection(stdout, report, cErrs, cWarns)
+	writeDefinitionsSection(stdout, lintReport, lErrs, lWarns)
+
+	// Only hard errors (from either axis) affect the exit code; warnings are
+	// informational and never fail the command.
+	if report.HasErrors() || lintReport.HasErrors() {
+		return 1
+	}
+	return 0
+}
+
+// writeConventionsSection renders the conventions report on stdout: a clean line
+// when conformant with no warnings, otherwise the count summary and every finding.
+func writeConventionsSection(stdout io.Writer, report *conventions.Report, errs, warns int) {
+	if report.Conformant() && warns == 0 {
+		fmt.Fprintln(stdout, "Conventions: workspace conforms (no violations).")
+		return
+	}
 	if report.Conformant() {
-		fmt.Fprintf(stdout, "Workspace conforms with %d warning%s (no errors):\n",
+		fmt.Fprintf(stdout, "Conventions: conforms with %d warning%s (no errors):\n",
 			warns, plural(warns, "", "s"))
 	} else {
-		fmt.Fprintf(stdout, "Workspace has %d convention error%s and %d warning%s:\n",
+		fmt.Fprintf(stdout, "Conventions: %d error%s and %d warning%s:\n",
 			errs, plural(errs, "", "s"), warns, plural(warns, "", "s"))
 	}
 	for _, f := range report.Findings {
 		fmt.Fprintf(stdout, "  - %s\n", f.Error())
 	}
+}
 
-	// Only hard errors affect the exit code; warnings are informational.
-	if report.HasErrors() {
-		return 1
+// writeDefinitionsSection renders the definition-linter report on stdout, mirroring
+// the conventions section so both axes read consistently.
+func writeDefinitionsSection(stdout io.Writer, report *linters.Report, errs, warns int) {
+	if report.Clean() && warns == 0 {
+		fmt.Fprintln(stdout, "Definitions: all agents, workflows and manifest are valid.")
+		return
 	}
-	return 0
+	if report.Clean() {
+		fmt.Fprintf(stdout, "Definitions: valid with %d warning%s (no errors):\n",
+			warns, plural(warns, "", "s"))
+	} else {
+		fmt.Fprintf(stdout, "Definitions: %d error%s and %d warning%s:\n",
+			errs, plural(errs, "", "s"), warns, plural(warns, "", "s"))
+	}
+	for _, f := range report.Findings {
+		fmt.Fprintf(stdout, "  - %s\n", f.Error())
+	}
+}
+
+// logFindings emits one decision-point log per convention finding (CA3/CA4): the
+// affected workspace-relative location, the convention family and the short rule
+// id it broke, and the structured reason. Hard violations log at error and
+// advisories at warn so the levels stay coherent with the rest of the
+// instrumentation (R4/CA4). It is observational only — it never changes the
+// report, the printed output or the exit code.
+func logFindings(logger *slog.Logger, findings []conventions.Finding) {
+	for _, f := range findings {
+		args := []any{
+			"phase", "validate",
+			"family", string(f.Family),
+			"definition", f.Location,
+			"convention", f.Convention,
+			"result", "invalid",
+			"reason", f.Reason,
+		}
+		if f.Severity == conventions.SeverityError {
+			logger.Error("convention violated", args...)
+		} else {
+			logger.Warn("convention violated", args...)
+		}
+	}
+}
+
+// logLintFindings emits one decision-point log per definition-linter finding,
+// mirroring logFindings so both validation axes log consistently (CA8/09-01): the
+// affected workspace-relative location, the definition family, the precise spot, the
+// rule and the reason. Hard violations log at error and advisories at warn. It is
+// observational only — it never changes the report, the output or the exit code.
+func logLintFindings(logger *slog.Logger, findings []linters.Finding) {
+	for _, f := range findings {
+		args := []any{
+			"phase", "lint",
+			"family", string(f.Family),
+			"definition", f.Location,
+			"spot", f.Spot,
+			"rule", f.Rule,
+			"result", "invalid",
+			"reason", f.Reason,
+		}
+		if f.Severity == linters.SeverityError {
+			logger.Error("definition rejected", args...)
+		} else {
+			logger.Warn("definition rejected", args...)
+		}
+	}
 }
 
 // writePreview renders, on stdout, the directories and root artifacts a plan

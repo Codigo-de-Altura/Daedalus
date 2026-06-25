@@ -16,6 +16,17 @@ anything — it **reports** violations, it does **not** auto-fix them. Fixing a
 violation is up to you (rename the file, move it into place, reorder the
 frontmatter), and the next run confirms the fix.
 
+The command checks your workspace along **two axes** and prints both in one
+report:
+
+- **Conventions** — how files and ids are named, how the workspace is laid out,
+  how artifacts are formatted, and how the backlog is linked. Described next.
+- **Definitions** — whether your agents, workflows, and manifest are themselves
+  well-formed. See [Validating definitions](#validating-definitions) below.
+
+A fresh [`daedalus init`](initializing-a-workspace.md) workspace passes both axes
+clean.
+
 ## The conventions
 
 The conventions fall into four families. Each one exists so that a workspace
@@ -88,8 +99,8 @@ daedalus validate --path ./my-repo
 ```
 
 The command inspects the `.daedalus/` workspace in that directory, checks it
-against all four convention families, and prints a single report. It writes
-nothing.
+against all four convention families **and** lints the definitions (agents,
+workflows, manifest), and prints a single report. It writes nothing.
 
 ### Options
 
@@ -147,6 +158,50 @@ Not every finding fails the check:
 
 A workspace whose only findings are warnings still conforms and still exits `0`.
 
+## Validating definitions
+
+Beyond the conventions, the same `daedalus validate` run **lints the definitions
+themselves** — your agents, your workflows, and your manifest — and prints them
+under a `Definitions:` section of the report. Conventions check that an artifact
+is named and placed correctly; the definition linters check that its **content**
+is well-formed and coherent. The linters read the **canonical model** in
+`.daedalus/`, not any backend's native format, so the result is the same whatever
+backend you compile to.
+
+Three families are linted:
+
+- **Agents** — each agent definition is schema-valid: the required fields are
+  present, the id is `kebab-case`, the role and prompt are filled in, and any
+  parameter types are valid.
+- **Workflows (DAG)** — each workflow is a coherent DAG: no **cycles**, no phase
+  that consumes an artifact **no phase produces**, no reference to an **unknown
+  agent**, no **duplicate phase ids**, and no malformed dependencies.
+- **Manifest (`daedalus.yaml`)** — the manifest's required fields are well-formed
+  (`name`, `version`, `backends`, `conventions`), every listed backend is a
+  **supported** one, and the conventions block is coherent.
+
+Each definition finding is **actionable**: it names the definition at fault, the
+exact spot inside it (a field, a phase, or a key), and what was expected versus
+what was found. Like the conventions report, the findings are deterministic and
+printed in a stable order, so the same workspace always produces the same output.
+
+For example, a manifest that lists a backend Daedalus does not support, and a
+workflow that loops back on itself, produce findings such as:
+
+```
+Definitions:
+  - [error] .daedalus/daedalus.yaml: backends: unsupported backend "acme-bot" (supported: claude-code)
+  - [error] .daedalus/workflows/sdd-default.yaml: dag: cycle detected through phase "review" -> "build" -> "review"
+```
+
+To fix these you would set `backends` to a supported value and break the cycle in
+the workflow's dependencies, then run `daedalus validate` again to confirm both
+axes are clean.
+
+> A pristine `daedalus init` workspace lints clean: the built-in agents that the
+> seeded default workflow references count as **known**, so a freshly initialized
+> project reports no definition errors.
+
 ## Exit codes
 
 `validate` sets its exit code so you can gate on it from a script or CI:
@@ -154,8 +209,11 @@ A workspace whose only findings are warnings still conforms and still exits `0`.
 | Exit code | Meaning |
 |---|---|
 | `0` | The workspace **conforms** — no violations, or only warnings (an optional gap never fails the check). |
-| `1` | The workspace has at least one **convention error**. |
+| `1` | The workspace has at least one **error** in **either** axis — a convention violation or a definition lint error. |
 | `2` | A usage or I/O error (for example, a path that has no `.daedalus/` workspace). |
+
+A single error in either the conventions or the definitions report is enough to
+exit `1`, so gating CI on `daedalus validate` covers both at once.
 
 ## Phase 1: read-only, no agents
 

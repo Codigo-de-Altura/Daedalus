@@ -110,3 +110,41 @@ output:
 Daedalus does not log secrets, tokens, credentials, or personal data. Log
 records contain identifiers and the decisions taken, never the sensitive values
 behind them.
+
+### Reading operation logs to troubleshoot
+
+`init`, `build` (alias `sync`), and `daedalus validate` emit structured events
+at their **decision points**, not just at the start and end. When an operation
+does not do what you expected, the log shows what Daedalus decided and why — so
+you rarely have to guess. Every path to a definition is recorded **relative to
+the workspace**, which makes the offending file easy to locate.
+
+What to look for:
+
+- **`init`** records whether a workspace already existed, whether it created or
+  upgraded one, and what it seeded — useful when a re-run does less than you
+  expected because the workspace was already present.
+- **`build`/`sync`** records that the workspace was located, the definition was
+  validated, the backend was compiled, and how many files it created, updated,
+  or left unchanged. The created/updated/unchanged counts make an idempotent
+  no-op visible: a re-build with everything unchanged is working as intended.
+- When a build **aborts on an invalid definition**, look for a
+  `definition rejected` event. It is logged at `WARN` with `result=invalid` (or
+  `malformed`), the `reason` it was refused, and the `definition` path so you
+  know which file to fix. Accepted definitions log the matching
+  `definition accepted` event at `INFO`.
+- When `daedalus validate` reports problems, each finding is a
+  `convention violated` event — `ERROR` for hard violations, `WARN` for
+  advisories — naming the `family`, the `convention`, the `definition` location,
+  and the `reason`. These mirror the report printed to the interface and let you
+  scan or filter the violations programmatically.
+
+For example, a rejected definition during a build looks like:
+
+```json
+{"time":"2026-06-23T10:00:00Z","level":"WARN","msg":"definition rejected","operation":"build","result":"invalid","definition":"agents/reviewer.md","reason":"missing required field: name"}
+```
+
+To capture only these events for inspection, redirect standard error as shown
+above and filter the resulting file for the message you need (for example,
+`definition rejected` or `convention violated`).

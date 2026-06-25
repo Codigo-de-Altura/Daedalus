@@ -253,8 +253,11 @@ func resolveAndCompile(opts Options) ([]Artifacts, error) {
 	}
 	logger.Info("workspace located", "root", filepath.ToSlash(root), "backends", manifest.Backends)
 
-	// 2. Validate the canonical definition before any adapter (REQ-3).
-	def, err := LoadDefinition(root)
+	// 2. Validate the canonical definition before any adapter (REQ-3). The
+	// logger-aware loader emits a per-definition validation event (CA3) in addition
+	// to the aggregate summary below, so the trace shows which agent/command was
+	// evaluated and why it passed or was rejected.
+	def, err := loadDefinition(root, logger)
 	if err != nil {
 		if IsDefinitionInvalid(err) {
 			logger.Error("build aborted", "phase", "validate", "root", filepath.ToSlash(root), "err", err)
