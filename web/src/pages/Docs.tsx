@@ -87,7 +87,11 @@ export default function Docs() {
   }, [source, slug]);
 
   return (
-    <div className="border-t border-ink-800/60 bg-grid bg-grid-fade">
+    <div className="relative border-t border-ink-800/60">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[360px] bg-grid bg-grid-fade opacity-60"
+      />
       <div className="mx-auto grid w-full max-w-[88rem] gap-10 px-5 py-10 sm:px-8 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_minmax(0,1fr)_14rem]">
         {/* Sidebar (desktop) */}
         <aside className="hidden lg:block">

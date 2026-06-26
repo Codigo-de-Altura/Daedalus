@@ -113,9 +113,11 @@ export function Terminal({
 /** An inline, copyable command pill. */
 export function CommandPill({ command }: { command: string }) {
   return (
-    <div className="ring-hairline flex items-center gap-3 rounded-xl bg-ink-900/80 py-1.5 pl-4 pr-1.5 backdrop-blur">
+    <div className="ring-hairline flex max-w-full items-center gap-3 rounded-xl bg-ink-900/80 py-1.5 pl-4 pr-1.5 backdrop-blur">
       <span className="select-none font-mono text-sm text-forge-400">$</span>
-      <code className="font-mono text-sm text-ink-100">{command}</code>
+      <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-sm text-ink-100">
+        {command}
+      </code>
       <CopyButton text={command} />
     </div>
   );

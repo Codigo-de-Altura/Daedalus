@@ -27,7 +27,7 @@ function ScrollManager() {
 
 export default function App() {
   return (
-    <div className="flex min-h-full flex-col">
+    <div className="flex min-h-full flex-col overflow-x-clip">
       <ScrollManager />
       <Navbar />
       <main className="flex-1">
