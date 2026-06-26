@@ -2,18 +2,63 @@
 
 [← Back to the manual index](../README.md)
 
-Daedalus ships as a single, self-contained Go binary. You can either **download
-a prebuilt binary** or **build it from source**. This page covers both, per
-platform, and how to verify the result.
+Daedalus ships as a single, self-contained Go binary. The fastest way to get it
+is the **install script**; you can also **download a prebuilt binary** manually
+or **build from source**. This page covers each option and how to verify the
+result.
 
-## Option A: Download a prebuilt binary (recommended)
+> Options A and B install from **GitHub Releases**, so they need a published
+> release. If there isn't one yet, [build from source](#option-c-build-from-source).
 
-Prebuilt binaries are published on **GitHub Releases**. Download the archive for
-your platform, extract the `daedalus` executable, and put it somewhere on your
-`PATH`.
+## Option A: Install script (recommended)
 
-> The signed release archives and the exact download URL/tag are produced by the
-> release pipeline. Until that ships, use [build from source](#option-b-build-from-source).
+The install script picks the right archive for your platform, verifies its
+SHA-256 checksum, extracts the `daedalus` executable, and places it on your
+`PATH` — in one command.
+
+### Linux and macOS
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Codigo-de-Altura/Daedalus/main/scripts/install.sh | sh
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/Codigo-de-Altura/Daedalus/main/scripts/install.ps1 | iex
+```
+
+By default the script installs the **latest** release. You can pin a version or
+change the install directory:
+
+| Setting           | Linux/macOS (env var)                | Windows (parameter)                |
+| ----------------- | ------------------------------------ | ---------------------------------- |
+| Specific version  | `DAEDALUS_VERSION=v0.1.0`            | `-Version v0.1.0`                  |
+| Install directory | `DAEDALUS_INSTALL_DIR=~/.local/bin` | `-BinDir C:\tools\daedalus`        |
+
+```sh
+# Linux/macOS — pin a version and install to a custom directory:
+DAEDALUS_VERSION=v0.1.0 DAEDALUS_INSTALL_DIR="$HOME/.local/bin" \
+  sh -c "$(curl -fsSL https://raw.githubusercontent.com/Codigo-de-Altura/Daedalus/main/scripts/install.sh)"
+```
+
+```powershell
+# Windows — pass parameters by building the script block first:
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Codigo-de-Altura/Daedalus/main/scripts/install.ps1))) -Version v0.1.0
+```
+
+> On macOS/Linux, if the script falls back to `~/.local/bin`, make sure that
+> directory is on your `PATH`. On Windows, open a **new** terminal after
+> installing so the updated `PATH` takes effect.
+
+After installing, jump to [Verify the installation](#verify-the-installation).
+
+## Option B: Download a prebuilt binary manually
+
+Prefer to do it by hand? Each
+[GitHub Release](https://github.com/Codigo-de-Altura/Daedalus/releases) attaches
+prebuilt archives and a `*_checksums.txt` file. Download the archive for your
+platform, extract the `daedalus` executable, and put it on your `PATH`.
 
 ### Linux and macOS
 
@@ -34,7 +79,7 @@ variable). You can then run `daedalus` from any terminal.
 
 After installing, jump to [Verify the installation](#verify-the-installation).
 
-## Option B: Build from source
+## Option C: Build from source
 
 Building from source works on every platform Go supports.
 
@@ -64,7 +109,8 @@ make build
 ```
 
 Move the resulting binary onto your `PATH` as shown in
-[Option A](#linux-and-macos) if you want to run it from anywhere.
+[Option B](#option-b-download-a-prebuilt-binary-manually) if you want to run it
+from anywhere.
 
 ## Verify the installation
 

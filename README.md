@@ -6,6 +6,25 @@ Instead of re-creating global prompts, agents, workflows, and a backlog by hand 
 
 > This repository is in its foundations stage (epic-00). The binary currently launches a minimal Bubble Tea skeleton; product features arrive in later epics.
 
+## Install
+
+The install script downloads the right prebuilt binary for your platform from
+GitHub Releases, verifies its checksum, and puts `daedalus` on your `PATH`:
+
+```sh
+# Linux and macOS
+curl -fsSL https://raw.githubusercontent.com/Codigo-de-Altura/Daedalus/main/scripts/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/Codigo-de-Altura/Daedalus/main/scripts/install.ps1 | iex
+```
+
+See the [installation guide](docs/getting-started/installation.md) for pinning a
+version, choosing an install directory, manual downloads, and building from
+source.
+
 ## Requirements
 
 - [Go](https://go.dev/dl/) 1.23 or newer (matches the `go` directive in `go.mod`).
@@ -93,6 +112,7 @@ internal/        Core packages (not importable outside this module)
   tui/           Bubble Tea bootstrap skeleton
 .github/workflows/  Continuous integration (build, test, lint)
 docs/            User manual (index + chapters), maintained alongside features
+scripts/         Install scripts (install.sh, install.ps1) for prebuilt binaries
 web/             Marketing + docs website (Vite + React SPA) for GitHub Pages
 development/     SDD planning artifacts (epics, tickets) — not shipped in the binary
 ```
