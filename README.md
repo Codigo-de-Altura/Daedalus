@@ -70,6 +70,11 @@ The full user manual lives in [`docs/`](docs/README.md) — installation,
 quickstart, the command-line guide, configuration, and contributing notes. It is
 organized as a manual with an index and grows alongside each feature.
 
+The public website (marketing landing page + the manual) is a single-page app in
+[`web/`](web/README.md), built with Vite + React and published to GitHub Pages.
+It renders the same markdown from `docs/`, so that content stays the single
+source of truth.
+
 ## Configuration
 
 | Environment variable | Values                         | Default | Purpose                       |
@@ -88,6 +93,7 @@ internal/        Core packages (not importable outside this module)
   tui/           Bubble Tea bootstrap skeleton
 .github/workflows/  Continuous integration (build, test, lint)
 docs/            User manual (index + chapters), maintained alongside features
+web/             Marketing + docs website (Vite + React SPA) for GitHub Pages
 development/     SDD planning artifacts (epics, tickets) — not shipped in the binary
 ```
 
