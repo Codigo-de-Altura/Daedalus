@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Daedalus</title>
+    <!--
+      GitHub Pages serves this file for any path it can't find on disk. Because
+      Daedalus is a single-page app, every /docs/* deep link lands here on a hard
+      refresh. We stash the requested URL and bounce to the app root; index.html
+      restores the URL before React Router mounts. If the base path changes
+      (e.g. a custom domain at "/"), update APP_BASE below to match Vite's base.
+    -->
+    <script>
+      var APP_BASE = "/Daedalus/";
+      sessionStorage.redirect = location.href;
+      location.replace(APP_BASE);
+    </script>
+  </head>
+  <body></body>
+</html>

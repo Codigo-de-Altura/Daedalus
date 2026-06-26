@@ -1,0 +1,227 @@
+/* Prose + syntax styles for the documentation, scoped to .markdown.
+   Hand-tuned to the Daedalus palette (warm ink + forge accent). */
+
+.markdown {
+  color: var(--color-ink-200);
+  font-size: 1rem;
+  line-height: 1.75;
+  max-width: 46rem;
+}
+
+.markdown > *:first-child {
+  margin-top: 0;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  color: var(--color-ink-50);
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  scroll-margin-top: 6rem;
+  text-wrap: balance;
+}
+
+.markdown h1 {
+  font-size: 2.25rem;
+  line-height: 1.15;
+  margin: 0 0 1.5rem;
+}
+
+.markdown h2 {
+  font-size: 1.5rem;
+  margin: 3rem 0 1rem;
+  padding-top: 1.75rem;
+  border-top: 1px solid color-mix(in oklab, var(--color-ink-700) 60%, transparent);
+}
+
+.markdown h3 {
+  font-size: 1.2rem;
+  margin: 2rem 0 0.75rem;
+}
+
+.markdown h4 {
+  font-size: 1.02rem;
+  margin: 1.5rem 0 0.5rem;
+}
+
+.markdown p {
+  margin: 1rem 0;
+}
+
+.markdown a {
+  color: var(--color-forge-300);
+  text-decoration: none;
+  text-underline-offset: 3px;
+  transition: color 0.15s ease;
+}
+.markdown a:hover {
+  color: var(--color-forge-200);
+  text-decoration: underline;
+}
+
+.markdown strong {
+  color: var(--color-ink-100);
+  font-weight: 600;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 1rem 0;
+  padding-left: 1.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.markdown ul {
+  list-style: none;
+}
+.markdown ul > li {
+  position: relative;
+  padding-left: 1rem;
+}
+.markdown ul > li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.7em;
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  transform: rotate(45deg);
+  background: var(--color-forge-500);
+}
+.markdown ol {
+  list-style: decimal;
+}
+.markdown li::marker {
+  color: var(--color-ink-500);
+}
+.markdown li > ul,
+.markdown li > ol {
+  margin: 0.4rem 0;
+}
+
+/* Inline code */
+.markdown :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: color-mix(in oklab, var(--color-ink-800) 80%, transparent);
+  color: var(--color-forge-200);
+  padding: 0.15em 0.4em;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-ink-200) 8%, transparent);
+}
+
+/* Code blocks */
+.markdown pre {
+  margin: 1.5rem 0;
+  padding: 1.1rem 1.25rem;
+  border-radius: 14px;
+  background: var(--color-ink-900);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-ink-200) 8%, transparent);
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.7;
+}
+.markdown pre code {
+  font-family: var(--font-mono);
+  background: none;
+  padding: 0;
+  color: var(--color-ink-200);
+}
+
+.markdown blockquote {
+  margin: 1.5rem 0;
+  padding: 0.5rem 1.1rem;
+  border-left: 3px solid var(--color-forge-500);
+  border-radius: 0 10px 10px 0;
+  background: color-mix(in oklab, var(--color-forge-500) 7%, transparent);
+  color: var(--color-ink-300);
+}
+.markdown blockquote p {
+  margin: 0.4rem 0;
+}
+
+.markdown hr {
+  margin: 2.5rem 0;
+  border: 0;
+  height: 1px;
+  background: color-mix(in oklab, var(--color-ink-700) 60%, transparent);
+}
+
+/* Tables */
+.markdown table {
+  width: 100%;
+  margin: 1.5rem 0;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  display: block;
+  overflow-x: auto;
+}
+.markdown th,
+.markdown td {
+  padding: 0.6rem 0.9rem;
+  border: 1px solid color-mix(in oklab, var(--color-ink-700) 55%, transparent);
+  text-align: left;
+}
+.markdown th {
+  background: color-mix(in oklab, var(--color-ink-800) 70%, transparent);
+  color: var(--color-ink-100);
+  font-weight: 600;
+}
+.markdown tr:nth-child(even) td {
+  background: color-mix(in oklab, var(--color-ink-800) 30%, transparent);
+}
+
+.markdown img {
+  max-width: 100%;
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-ink-200) 8%, transparent);
+}
+
+/* ---- highlight.js theme (forge) ---- */
+.markdown .hljs-comment,
+.markdown .hljs-quote {
+  color: var(--color-ink-500);
+  font-style: italic;
+}
+.markdown .hljs-keyword,
+.markdown .hljs-selector-tag,
+.markdown .hljs-literal,
+.markdown .hljs-section,
+.markdown .hljs-link {
+  color: #e6a3f0;
+}
+.markdown .hljs-string,
+.markdown .hljs-attr,
+.markdown .hljs-meta-string {
+  color: #8fd6a0;
+}
+.markdown .hljs-number,
+.markdown .hljs-symbol,
+.markdown .hljs-bullet {
+  color: var(--color-forge-300);
+}
+.markdown .hljs-title,
+.markdown .hljs-name,
+.markdown .hljs-type,
+.markdown .hljs-built_in {
+  color: var(--color-forge-200);
+}
+.markdown .hljs-attribute,
+.markdown .hljs-variable,
+.markdown .hljs-template-variable {
+  color: #9fc8f0;
+}
+.markdown .hljs-meta {
+  color: var(--color-ink-400);
+}
+.markdown .hljs-emphasis {
+  font-style: italic;
+}
+.markdown .hljs-strong {
+  font-weight: 700;
+}
