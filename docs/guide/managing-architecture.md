@@ -434,7 +434,7 @@ document says so in its body, and a linked document's frontmatter carries
 architecture, drop it into the file — with `daedalus architecture edit` or by
 hand — and refine it.
 
-## Notes & limitations
+## Notes and limitations
 
 - Architecture documents are persisted as Markdown files under
   `.daedalus/architecture/`, one file per document, named `<slug>.md`, in a

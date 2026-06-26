@@ -1,0 +1,72 @@
+# GoReleaser configuration for Daedalus.
+#
+# Cross-compiles the `daedalus` CLI for {windows, darwin, linux} x {amd64, arm64},
+# packages each target as an archive (.zip on Windows, .tar.gz elsewhere),
+# emits a checksums file, and publishes everything to GitHub Releases.
+#
+# The release version comes from the git tag (vX.Y.Z) and is injected via
+# ldflags into internal/buildinfo.Version, so the downloaded binary reports
+# the tag version with `--version` (not the "0.1.0-dev" default).
+#
+# Verify locally without publishing:
+#   goreleaser check
+#   goreleaser release --snapshot --clean
+version: 2
+
+project_name: daedalus
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: daedalus
+    main: ./cmd/daedalus
+    binary: daedalus
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    # Reproducible builds: strip absolute paths and inject the release version.
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/Codigo-de-Altura/Daedalus/internal/buildinfo.Version={{ .Version }}
+
+archives:
+  - id: daedalus
+    ids:
+      - daedalus
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # Windows users expect zip archives; Unix targets ship as tar.gz.
+    format_overrides:
+      - goos: windows
+        formats: ["zip"]
+    files:
+      - README.md
+      - src: docs/**/*
+        dst: docs
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  # Lets `--snapshot` build with a simulated version derived from the latest
+  # commit when no tag is present.
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  use: github
+
+release:
+  github:
+    owner: Codigo-de-Altura
+    name: Daedalus
+  # Let GitHub render release notes from the merged commits/PRs.
+  mode: append

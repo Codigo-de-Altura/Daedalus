@@ -212,7 +212,7 @@ index of its own**: the artifacts' frontmatter is the single source of truth, so
 the result always reflects the current state of your files. Edit a link by hand
 and the next `trace` run sees the change immediately.
 
-## Notes & limitations
+## Notes and limitations
 
 - `trace` is **read-only and deterministic**: the same workspace state always
   produces the same report, with findings in a stable, worst-first order. It

@@ -497,7 +497,7 @@ daedalus: agent "analyst-custom" is invalid; the edit was not applied:
 The findings are listed in a stable order (`id`, `role`, `prompt`, then
 `parameters`), so the same definition always produces the same report.
 
-## Notes & limitations
+## Notes and limitations
 
 - The catalog ships **embedded in the binary**. A remote catalog or marketplace
   is out of scope for Phase 1.

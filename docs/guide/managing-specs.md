@@ -420,7 +420,7 @@ its frontmatter carries `generated: false` to make that explicit. Once you have
 the generated spec/PRD, drop it into the spec file — with `daedalus spec edit` or
 by hand — and refine it.
 
-## Notes & limitations
+## Notes and limitations
 
 - A brief and its spec are persisted as Markdown files under `.daedalus/specs/`,
   paired by a shared `kebab-case` slug (`<slug>.brief.md` and `<slug>.md`), in a

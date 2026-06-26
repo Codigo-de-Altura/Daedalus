@@ -1,0 +1,45 @@
+# Release pipeline for Daedalus.
+#
+# Triggered by pushing a semver tag (vX.Y.Z). It cross-compiles, packages and
+# publishes downloadable binaries to GitHub Releases via GoReleaser.
+#
+# Independent from ci.yml (which runs on push to main + pull requests).
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+# Minimal permissions: only what GoReleaser needs to publish the release.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # GoReleaser needs the full history (and tags) to derive the version
+          # and build the changelog.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Keep in sync with the `go` directive in go.mod and ci.yml.
+          go-version: '1.23'
+          cache: true
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          # Pinned GoReleaser version for reproducibility (CA5). Validated locally
+          # with `goreleaser check` and `release --snapshot --clean`.
+          version: 'v2.16.0'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
