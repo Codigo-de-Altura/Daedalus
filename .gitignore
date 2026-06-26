@@ -1,6 +1,9 @@
 # Go build artifacts
 /bin/
 /dist/
+
+# Documentation site build (MkDocs output)
+/site/
 *.exe
 *.exe~
 *.dll

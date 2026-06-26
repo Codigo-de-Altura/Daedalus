@@ -1,0 +1,4 @@
+# Pinned tooling for building and publishing the documentation site.
+# Exact versions keep the build reproducible across local machines and CI.
+# mkdocs-material pulls in a compatible mkdocs as a transitive dependency.
+mkdocs-material==9.5.39

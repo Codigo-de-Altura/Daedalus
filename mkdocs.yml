@@ -1,0 +1,90 @@
+site_name: Daedalus
+site_description: >-
+  Daedalus is a lightweight TUI/CLI that automates the setup and management of a
+  project's AI scaffolding — agents, prompts, DAG workflows, and an SDD backlog —
+  in a backend-agnostic way, and compiles it to your tool's native format.
+repo_url: https://github.com/Codigo-de-Altura/Daedalus
+repo_name: Codigo-de-Altura/Daedalus
+
+# The manual content lives in docs/; the index page is docs/README.md.
+docs_dir: docs
+
+# Broken internal links and pages missing from the nav are treated as errors so
+# the published site always stays in sync with the manual (CI runs --strict too).
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+
+# Extensions Material relies on. Kept explicit for reproducibility and so the
+# existing markdown (code fences, admonitions, relative .md links with anchors)
+# renders consistently.
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+
+# The nav mirrors docs/README.md's adoption journey and keeps the
+# "use the product" (Guide) and "work on the product" (Contributing) audiences
+# clearly separated. Every page under docs/ appears exactly once.
+nav:
+  - Home: README.md
+  - Getting started:
+      - Install: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+  - Guide:
+      - Concepts: guide/concepts.md
+      - Core workflow: guide/core-workflow.md
+      - Command reference: guide/command-reference.md
+      - Command line: guide/command-line.md
+      - Navigating the interface: guide/navigating-the-tui.md
+      - Initializing a workspace: guide/initializing-a-workspace.md
+      - Managing agents: guide/managing-agents.md
+      - Managing prompts: guide/managing-prompts.md
+      - Managing workflows: guide/managing-workflows.md
+      - Managing specs: guide/managing-specs.md
+      - Managing architecture: guide/managing-architecture.md
+      - Managing epics and tickets: guide/managing-epics-and-tickets.md
+      - Tracing the backlog: guide/tracing-the-backlog.md
+      - Validating conventions: guide/validating-conventions.md
+      - Compiling to a backend: guide/compiling-to-a-backend.md
+      - Configuration: guide/configuration.md
+      - Examples: guide/examples.md
+      - Troubleshooting: guide/troubleshooting.md
+  - Contributing:
+      - Development environment: contributing/development-environment.md
+      - Continuous integration: contributing/continuous-integration.md
+      - Testing and golden files: contributing/testing-and-golden-files.md
