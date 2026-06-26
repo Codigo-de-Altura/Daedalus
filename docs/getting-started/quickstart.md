@@ -9,7 +9,20 @@ Every command and output below matches Daedalus's actual behavior.
 
 ## 1. Install and verify
 
-Install Daedalus (see [Installation](installation.md)), then confirm it runs:
+Install Daedalus with the one-line script (see [Installation](installation.md)
+for pinning a version, manual downloads, and building from source):
+
+```sh
+# Linux and macOS
+curl -fsSL https://raw.githubusercontent.com/Codigo-de-Altura/Daedalus/main/scripts/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/Codigo-de-Altura/Daedalus/main/scripts/install.ps1 | iex
+```
+
+Then confirm it runs:
 
 ```sh
 daedalus --version

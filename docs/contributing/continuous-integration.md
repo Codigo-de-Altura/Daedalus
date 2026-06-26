@@ -60,7 +60,8 @@ The release workflow (`.github/workflows/release.yml`) runs **GoReleaser**
 `.goreleaser.yaml`, it cross-compiles the six targets — `windows`, `darwin`, and
 `linux`, each for `amd64` and `arm64` — packages them as archives with a
 checksums file, injects the version through `ldflags`, and publishes everything
-as a **GitHub Release**. Those archives are what end users download; see
+as a **GitHub Release**. Those archives (and their checksums file) are what the
+install scripts download for end users; see
 [Installation](../getting-started/installation.md).
 
 ### Verify the release locally

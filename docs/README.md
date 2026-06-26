@@ -15,8 +15,9 @@ troubleshooting. Already comfortable? Jump straight to the
 
 Follow these in order the first time through.
 
-1. **[Install](getting-started/installation.md)** — download a prebuilt binary
-   or build from source, per platform; verify with `daedalus --version`.
+1. **[Install](getting-started/installation.md)** — run the one-line install
+   script (or download a prebuilt binary manually / build from source), per
+   platform; verify with `daedalus --version`.
 2. **[Quickstart](getting-started/quickstart.md)** — go from zero to a compiled
    workspace: `init` → `validate` → `build`. A reproducible end-to-end run.
 3. **[Concepts](guide/concepts.md)** — the `.daedalus/` workspace, the canonical
