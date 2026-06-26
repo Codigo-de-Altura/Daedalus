@@ -96,11 +96,16 @@ source of truth.
 
 ## Configuration
 
-| Environment variable | Values                         | Default | Purpose                       |
-| -------------------- | ------------------------------ | ------- | ----------------------------- |
-| `DAEDALUS_LOG_LEVEL` | `debug`, `info`, `warn`, `error` | `info`  | Minimum structured-log level. |
+| Environment variable  | Values                           | Default | Purpose                                                   |
+| --------------------- | -------------------------------- | ------- | --------------------------------------------------------- |
+| `DAEDALUS_LOG_LEVEL`  | `debug`, `info`, `warn`, `error` | `warn`  | Minimum log level; `info`/`debug` are opt-in.             |
+| `DAEDALUS_LOG_FORMAT` | `text`, `json`                   | `text`  | Log rendering: human console (`text`) or structured JSON. |
 
-Logs are structured (JSON) and written to `stderr`, so they never interfere with the TUI render on `stdout`.
+By default Daedalus stays quiet: command output is human-readable and only
+warnings and errors surface, as a compact console line. Set
+`DAEDALUS_LOG_LEVEL=info` (or `debug`) for detailed telemetry, and
+`DAEDALUS_LOG_FORMAT=json` for machine-parseable records. Logs are written to
+`stderr`, so they never interfere with the interface on `stdout`.
 
 ## Project layout
 

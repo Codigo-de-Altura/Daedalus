@@ -10,7 +10,12 @@ import (
 
 // runValidateInDir runs `daedalus validate` against dir, capturing stdout/stderr
 // (the logger writes to stderr), so a test can assert on the emitted log events.
-func runValidateInDir(dir string) (code int, stdout, stderr string) {
+// These tests verify the structured telemetry, so they opt into JSON at info
+// level explicitly — the CLI's default is the quiet, human-readable console.
+func runValidateInDir(t *testing.T, dir string) (code int, stdout, stderr string) {
+	t.Helper()
+	t.Setenv("DAEDALUS_LOG_FORMAT", "json")
+	t.Setenv("DAEDALUS_LOG_LEVEL", "info")
 	var outBuf, errBuf bytes.Buffer
 	code = runValidate([]string{"--path", dir}, &outBuf, &errBuf)
 	return code, outBuf.String(), errBuf.String()
@@ -65,7 +70,7 @@ func TestValidateLogsPerFinding(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, _, stderr := runValidateInDir(dir)
+	code, _, stderr := runValidateInDir(t, dir)
 	if code != 1 {
 		t.Fatalf("validate exit = %d, want 1 (hard violations present)", code)
 	}
@@ -108,7 +113,7 @@ func TestValidateConformantLogsNoFindings(t *testing.T) {
 		t.Fatalf("init failed (%d): %s", code, stderr)
 	}
 
-	code, _, stderr := runValidateInDir(dir)
+	code, _, stderr := runValidateInDir(t, dir)
 	events := decodeLogLines(t, stderr)
 
 	for _, ev := range events {

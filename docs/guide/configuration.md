@@ -65,32 +65,44 @@ never overwrites it — see
 
 ## Logging
 
-Daedalus emits structured (JSON) log records at key decision points. Logs are
+By default Daedalus is **quiet**: each command prints human-readable output, and
+the logger only surfaces **warnings and errors** — as a compact, readable console
+line, not JSON. Detailed telemetry is one environment variable away. Logs are
 written to **standard error**, so they never interfere with the interface, which
 uses standard output.
 
-### Log levels
+### Levels and format
 
-Set the minimum log level with the `DAEDALUS_LOG_LEVEL` environment variable.
+| Variable              | Values                           | Default | Purpose                                                   |
+| --------------------- | -------------------------------- | ------- | --------------------------------------------------------- |
+| `DAEDALUS_LOG_LEVEL`  | `debug`, `info`, `warn`, `error` | `warn`  | Minimum level; `info`/`debug` are opt-in.                 |
+| `DAEDALUS_LOG_FORMAT` | `text`, `json`                   | `text`  | Rendering: human console (`text`) or structured (`json`). |
 
-| Variable             | Values                           | Default |
-| -------------------- | -------------------------------- | ------- |
-| `DAEDALUS_LOG_LEVEL` | `debug`, `info`, `warn`, `error` | `info`  |
-
-Unknown or empty values fall back to `info`.
+Unknown or empty values fall back to the defaults (`warn`, `text`).
 
 ```sh
-# Show debug-level detail
+# Quiet by default: only warnings and errors, as readable console lines.
+./daedalus
+
+# Detailed, human-readable telemetry
 DAEDALUS_LOG_LEVEL=debug ./daedalus
 
-# Only warnings and errors
-DAEDALUS_LOG_LEVEL=warn ./daedalus
+# Structured JSON for tooling/telemetry (at any level)
+DAEDALUS_LOG_FORMAT=json DAEDALUS_LOG_LEVEL=info ./daedalus
 ```
 
 ### What the logs look like
 
-Each record is a single JSON object with at least a timestamp, level, and
-message, plus any contextual key/value fields:
+The default **text** format is a single, human-friendly line per record — the
+level, the message, then any contextual `key=value` fields (colored on a
+terminal):
+
+```text
+warning: definition rejected definition=agents/reviewer.md result=invalid reason=missing required field: name
+```
+
+The **json** format emits one structured object per record — a timestamp, level,
+message, and the same fields — meant for machine parsing and telemetry:
 
 ```json
 {"time":"2026-06-23T10:00:00Z","level":"INFO","msg":"daedalus starting","version":"0.1.0-dev","interactive":true}
@@ -102,7 +114,7 @@ Because logs go to standard error, you can redirect them independently of normal
 output:
 
 ```sh
-./daedalus 2> daedalus.log
+DAEDALUS_LOG_FORMAT=json ./daedalus 2> daedalus.log
 ```
 
 ### Privacy
@@ -113,11 +125,14 @@ behind them.
 
 ### Reading operation logs to troubleshoot
 
-`init`, `build` (alias `sync`), and `daedalus validate` emit structured events
-at their **decision points**, not just at the start and end. When an operation
-does not do what you expected, the log shows what Daedalus decided and why — so
-you rarely have to guess. Every path to a definition is recorded **relative to
-the workspace**, which makes the offending file easy to locate.
+`init`, `build` (alias `sync`), and `daedalus validate` emit events at their
+**decision points**, not just at the start and end. By default you see the
+warnings and errors among them as readable lines; for the full trace (including
+the `info`-level started/accepted events) and machine-parseable records, run with
+`DAEDALUS_LOG_LEVEL=info DAEDALUS_LOG_FORMAT=json`. When an operation does not do
+what you expected, the log shows what Daedalus decided and why — so you rarely
+have to guess. Every path to a definition is recorded **relative to the
+workspace**, which makes the offending file easy to locate.
 
 What to look for:
 
@@ -139,12 +154,12 @@ What to look for:
   and the `reason`. These mirror the report printed to the interface and let you
   scan or filter the violations programmatically.
 
-For example, a rejected definition during a build looks like:
+For example, a rejected definition during a build, in `json` format, looks like:
 
 ```json
 {"time":"2026-06-23T10:00:00Z","level":"WARN","msg":"definition rejected","operation":"build","result":"invalid","definition":"agents/reviewer.md","reason":"missing required field: name"}
 ```
 
-To capture only these events for inspection, redirect standard error as shown
-above and filter the resulting file for the message you need (for example,
-`definition rejected` or `convention violated`).
+To capture only these events for inspection, run with `DAEDALUS_LOG_FORMAT=json`,
+redirect standard error as shown above, and filter the resulting file for the
+message you need (for example, `definition rejected` or `convention violated`).

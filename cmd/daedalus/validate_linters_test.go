@@ -30,7 +30,7 @@ func TestValidateSurfacesDefinitionLinterFindings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stdout, _ := runValidateInDir(dir)
+	code, stdout, _ := runValidateInDir(t, dir)
 	if code != 1 {
 		t.Fatalf("validate exit = %d, want 1 (an invalid definition is present)", code)
 	}
@@ -51,7 +51,7 @@ func TestValidateCleanWorkspacePassesBothAxes(t *testing.T) {
 		t.Fatalf("init failed (%d): %s", code, stderr)
 	}
 
-	code, stdout, _ := runValidateInDir(dir)
+	code, stdout, _ := runValidateInDir(t, dir)
 	if code != 0 {
 		t.Fatalf("validate exit = %d, want 0 on a clean workspace; stdout:\n%s", code, stdout)
 	}
