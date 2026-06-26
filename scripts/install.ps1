@@ -38,10 +38,20 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
 # --- resolve the release tag ---
 if (-not $Version) {
   Info 'Resolving latest release...'
-  $rel = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" `
-    -Headers @{ 'User-Agent' = 'daedalus-installer' }
-  $Version = $rel.tag_name
-  if (-not $Version) { throw 'could not find a published release yet — build from source instead (see the docs)' }
+  try {
+    $rel = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" `
+      -Headers @{ 'User-Agent' = 'daedalus-installer' }
+    $Version = $rel.tag_name
+  } catch {
+    Write-Host ''
+    Write-Warning "No published release found for $repo yet."
+    Write-Host "Build from source instead: https://github.com/$repo#install" -ForegroundColor Yellow
+    return
+  }
+  if (-not $Version) {
+    Write-Warning "No published release found for $repo yet. Build from source: https://github.com/$repo#install"
+    return
+  }
 }
 $ver = $Version.TrimStart('v')
 
@@ -58,7 +68,11 @@ New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 try {
   $zip = Join-Path $tmp $asset
   Info "Downloading $asset ($Version)..."
-  Invoke-WebRequest "$base/$asset" -OutFile $zip -UseBasicParsing
+  try {
+    Invoke-WebRequest "$base/$asset" -OutFile $zip -UseBasicParsing
+  } catch {
+    throw "could not download the release asset for $Version. Verify the release exists and includes a windows_$arch build:`n  $base/$asset"
+  }
 
   # --- verify checksum ---
   try {
