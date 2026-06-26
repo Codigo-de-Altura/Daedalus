@@ -2,6 +2,10 @@
 
 export const GITHUB_URL = "https://github.com/Codigo-de-Altura/Daedalus";
 
+/** One-line install command shown in the hero (Linux/macOS). */
+export const INSTALL_CMD =
+  "curl -fsSL https://raw.githubusercontent.com/Codigo-de-Altura/Daedalus/main/scripts/install.sh | sh";
+
 export const DOCS_HOME = "/docs";
 export const QUICKSTART = "/docs/getting-started/quickstart";
 export const INSTALL = "/docs/getting-started/installation";

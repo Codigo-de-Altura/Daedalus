@@ -2,7 +2,7 @@ import { motion, Reveal } from "../motion";
 import { Container, Button, Badge } from "../ui";
 import { Window, Terminal, CommandPill, type Line } from "../CodeWindow";
 import { Labyrinth } from "../Labyrinth";
-import { GITHUB_URL, QUICKSTART } from "../../lib/site";
+import { GITHUB_URL, INSTALL_CMD, QUICKSTART } from "../../lib/site";
 
 const heroLines: Line[] = [
   { kind: "cmd", text: "daedalus init" },
@@ -67,7 +67,7 @@ export default function Hero() {
           </Reveal>
 
           <Reveal delay={0.2}>
-            <CommandPill command="go build -o daedalus ./cmd/daedalus" />
+            <CommandPill command={INSTALL_CMD} />
           </Reveal>
         </div>
 
