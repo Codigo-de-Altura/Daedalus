@@ -82,7 +82,7 @@ Daedalus generates real, ready-to-use content for both. Like everything `init`
 produces, they are **deterministic** (the same project always yields the same
 file, byte for byte) and they are **non-destructive**: if either file already
 exists with your own content, `init` leaves it untouched (see
-[Re-running `init`: detect & upgrade](#re-running-init-detect--upgrade)).
+[Re-running `init`: detect and upgrade](#re-running-init-detect-and-upgrade)).
 
 ### `daedalus.yaml` — the manifest
 
@@ -178,7 +178,7 @@ Re-run the command with a supported backend (or no `--backend` flag) to proceed.
 already contains your code. It is also **deterministic** — the same repository
 always produces the same structure, which keeps Git diffs clean.
 
-## Re-running `init`: detect & upgrade
+## Re-running `init`: detect and upgrade
 
 `init` is safe to run as many times as you like. When a `.daedalus/` workspace
 already exists, Daedalus detects it and performs a **non-destructive upgrade**

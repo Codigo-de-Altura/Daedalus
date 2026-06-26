@@ -13,16 +13,16 @@ In an interactive terminal:
 ./daedalus
 ```
 
-The interface opens on the **Prompts** section, which lists the prompts in the
-current directory's workspace and lets you preview any of them as composed,
-rendered Markdown. Press `tab` to switch to the **Workflows** section, which
-lists the workspace's workflows and draws any of them as a read-only graph (DAG).
-A help line at the bottom shows the keys available on the current screen. See:
+The interface opens on a **root menu** listing the six areas of your workspace —
+**Init**, **Agents**, **Prompts**, **Workflows**, **Backlog**, and **Build**.
+Press `enter` to enter an area, `esc` to go back, and `h` to return to the root
+menu; a help line at the bottom shows the keys available on the current screen.
+The interface is **read-only** — it shows you what is there; you create and edit
+artifacts with the `daedalus` commands.
 
-- [Previewing prompts in the interface](managing-prompts.md#previewing-prompts-in-the-interface)
-  — browsing and previewing prompts.
-- [Visualizing a workflow in the TUI](managing-workflows.md#visualizing-a-workflow-in-the-tui)
-  — switching sections and reading the DAG.
+[Navigating the interface](navigating-the-tui.md) is the authoritative chapter on
+the TUI: the six areas, moving in and out, the breadcrumb, reading documents,
+filtering lists, contextual help, and the full keyboard reference.
 
 ### Quitting
 
@@ -52,9 +52,18 @@ in an unexpected state.
 
 ## Subcommands
 
-| Command         | Purpose                                                |
-| --------------- | ------------------------------------------------------ |
-| `daedalus init` | Create the `.daedalus/` workspace in a repository.     |
+Daedalus dispatches subcommands **positionally**. The core subcommands are:
 
-See [Initializing a workspace](initializing-a-workspace.md) for details on
-`init`. Each subcommand supports `--help`, for example `daedalus init --help`.
+| Command            | Purpose                                                        |
+| ------------------ | -------------------------------------------------------------- |
+| `daedalus init`    | Create (or non-destructively upgrade) the `.daedalus/` workspace. |
+| `daedalus build`   | Compile the canonical definition to your backend (alias `sync`). |
+| `daedalus validate`| Check the workspace against the conventions and lint definitions. |
+| `daedalus trace`   | Verify or navigate the spec → epic → ticket traceability chain. |
+
+Daedalus also provides definition-management and SDD-backlog subcommands —
+`agent`, `prompt`, `workflow`, `spec`, `architecture`, `epic`, and `ticket`.
+
+Each subcommand supports `--help`, for example `daedalus init --help`. For the
+full surface — purpose, flags, exit codes, and examples — see the
+[Command reference](command-reference.md).

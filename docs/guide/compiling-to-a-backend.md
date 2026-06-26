@@ -365,7 +365,7 @@ To review these classifications artifact by artifact — and the exact content
 changes — before anything is written, use the
 [interactive preview](#previewing-and-confirming-changes).
 
-## Notes & limitations
+## Notes and limitations
 
 - **Deterministic.** The same workspace state always produces the same output,
   byte for byte, with stable, kebab-case file names derived from canonical ids.

@@ -56,7 +56,7 @@ The manifest is yours to edit. Open `.daedalus/daedalus.yaml` to review or adjus
 the values, then commit it with the rest of your project. Because `init` is
 non-destructive, once the manifest exists with your content, re-running `init`
 never overwrites it — see
-[Re-running `init`: detect & upgrade](initializing-a-workspace.md#re-running-init-detect--upgrade).
+[Re-running `init`: detect and upgrade](initializing-a-workspace.md#re-running-init-detect-and-upgrade).
 
 > Note on quoting: `version` is written as a quoted string (`"1"`) so it is
 > always read as text, never as a number. The other generated values are plain

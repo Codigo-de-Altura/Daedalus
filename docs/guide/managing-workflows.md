@@ -614,7 +614,7 @@ can draw a workflow as a **graph (DAG)**, so you can see the pipeline's shape �
 its phases and how they depend on each other — without reading the YAML. The view
 is **read-only**: it never edits or runs anything.
 
-### Switching to the Workflows section
+### Opening the Workflows area
 
 Run `daedalus` with no subcommand in an interactive terminal:
 
@@ -622,22 +622,23 @@ Run `daedalus` with no subcommand in an interactive terminal:
 daedalus
 ```
 
-The interface opens on the **Prompts** section. Press `tab` to switch between the
-**Prompts** and **Workflows** sections; the title changes to `Daedalus ·
-Workflows` and the list shows every workflow in the current directory's
-`.daedalus/workflows/`, each with its name and phase count:
+The interface opens on the **root menu**, which lists the six areas of your
+workspace. Move the selection to **Workflows** and press `enter` to open it. The
+breadcrumb reads `Daedalus › Workflows` and the list shows every workflow in the
+current directory's `.daedalus/workflows/`, each with its name and phase count:
 
 ```
-Daedalus · Workflows
+Daedalus › Workflows
 
   release-pipeline  [2 phases]
 ```
 
-> The browser reads the `.daedalus/workflows/` of the directory you launch it
+> The interface reads the `.daedalus/workflows/` of the directory you launch it
 > from, so run it from inside your project.
 
-Each section keeps its own selection, so pressing `tab` to switch back returns
-you to where you were.
+Press `esc` to step back to the root menu, or `h` to jump there from anywhere.
+See [Navigating the interface](navigating-the-tui.md) for the full set of areas
+and keys.
 
 ### Browsing the list
 
@@ -646,7 +647,9 @@ you to where you were.
 | `↑` / `k` | Move the selection up. |
 | `↓` / `j` | Move the selection down. |
 | `enter` / `l` | Open the DAG view for the selected workflow. |
-| `tab` | Switch section (Prompts ↔ Workflows). |
+| `/` | Filter the list. |
+| `esc` / `backspace` | Go back to the root menu. |
+| `h` | Jump to the root menu. |
 | `?` | Toggle the help footer (short ↔ full). |
 | `q` / `Ctrl+C` | Quit. |
 
@@ -739,7 +742,7 @@ Create one with `daedalus workflow create`, or run `daedalus init`
 if this directory is not a Daedalus workspace yet.
 ```
 
-## Notes & limitations
+## Notes and limitations
 
 - Workflows are persisted as YAML files under `.daedalus/workflows/`, one file
   per workflow, in a deterministic, git-friendly format. The same workflow

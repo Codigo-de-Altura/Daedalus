@@ -505,7 +505,7 @@ Daedalus. The seeded body says so, and a linked artifact's frontmatter carries
 `generated: false` to make that explicit. Once you have the generated content,
 drop it into the file — with `edit` or by hand — and refine it.
 
-## Notes & limitations
+## Notes and limitations
 
 - The backlog is a **nested** tree under `.daedalus/epics/`: each epic is a
   folder (`epic-NN-<slug>/epic.md`) and its tickets live in `tickets/`

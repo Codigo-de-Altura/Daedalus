@@ -498,18 +498,24 @@ Run `daedalus` with no subcommand in an interactive terminal:
 daedalus
 ```
 
-It opens on the **prompt list**, showing every prompt in the current directory's
-`.daedalus/prompts/` with its id, kind, and title:
+The interface opens on the **root menu**, which lists the six areas of your
+workspace. Move the selection to **Prompts** and press `enter` to open it. The
+breadcrumb reads `Daedalus › Prompts` and the list shows every prompt in the
+current directory's `.daedalus/prompts/` with its id, kind, and title:
 
 ```
-Daedalus · Prompts
+Daedalus › Prompts
 
   glossary  [shared]  Project Glossary
   project-style  [global]  Project Style
 ```
 
-> The browser reads the `.daedalus/prompts/` of the directory you launch it
+> The interface reads the `.daedalus/prompts/` of the directory you launch it
 > from, so run it from inside your project.
+
+Press `esc` to step back to the root menu, or `h` to jump there from anywhere.
+See [Navigating the interface](navigating-the-tui.md) for the full set of areas
+and keys.
 
 ### Browsing the list
 
@@ -518,7 +524,9 @@ Daedalus · Prompts
 | `↑` / `k` | Move the selection up. |
 | `↓` / `j` | Move the selection down. |
 | `enter` / `l` | Open the preview for the selected prompt. |
-| `tab` | Switch section (Prompts ↔ Workflows). See [Visualizing a workflow in the TUI](managing-workflows.md#visualizing-a-workflow-in-the-tui). |
+| `/` | Filter the list. |
+| `esc` / `backspace` | Go back to the root menu. |
+| `h` | Jump to the root menu. |
 | `?` | Toggle the help footer (short ↔ full). |
 | `q` / `Ctrl+C` | Quit. |
 
@@ -562,7 +570,7 @@ message instead of broken content, and the app keeps running. Return to the list
 with `esc`, fix the prompt with `daedalus prompt edit`, and open the preview
 again.
 
-## Notes & limitations
+## Notes and limitations
 
 - Prompts are persisted as Markdown files under `.daedalus/prompts/`, one file
   per prompt, in a deterministic, git-friendly format. The same prompt always

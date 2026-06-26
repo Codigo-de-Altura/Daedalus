@@ -111,37 +111,32 @@ workflows, manifest), and prints a single report. It writes nothing.
 
 ## Reading the report
 
-When the workspace follows every convention, `validate` says so and exits with
-status `0`:
+The report has one line per axis. When the workspace follows every convention
+and every definition is well-formed, `validate` says so on both axes and exits
+with status `0`:
 
 ```
-Workspace conforms to the conventions (no violations).
+Conventions: workspace conforms (no violations).
+Definitions: all agents, workflows and manifest are valid.
 ```
 
-When it finds something, it prints one line per violation. Each line has the
-same shape:
+When an axis finds something, it prints a count followed by one line per
+finding. Each finding line has the same shape:
 
 ```
-[severity] location: convention: reason
+[severity] location: spot: rule: reason
 ```
 
 - **`[severity]`** is `error` or `warning` (see below).
 - **`location`** is the file or directory at fault.
-- **`convention`** is the short name of the rule that was broken.
-- **`reason`** explains what is expected and how to bring it into line.
+- **`spot`** is the exact place inside it (a field, a key, a phase).
+- **`rule`** is the short name of the convention or schema rule that was broken.
+- **`reason`** explains what was observed and what was expected.
 
-A run with violations looks like this — and, because there is at least one
-error, the command exits `1`:
-
-```
-Workspace has 2 convention errors and 0 warnings:
-  - [error] .daedalus/epics/epic-bad: epic-id-pattern: an epic directory name must match epic-NN-<slug> (NN numeric, slug kebab-case)
-  - [error] .daedalus/prompts/BadName.md: kebab-case: a prompt id (its file name without .md) must be kebab-case
-```
-
-To fix these you would rename `epic-bad` to a valid `epic-NN-<slug>` directory
-and rename `BadName.md` to `bad-name.md`, then run `daedalus validate` again to
-confirm the workspace conforms.
+See [Validating definitions](#validating-definitions) below for a worked
+`Definitions:` example. Because a single error in either axis exits `1`, fix
+every reported finding and run `daedalus validate` again to confirm the
+workspace conforms.
 
 ### Errors vs. warnings
 
@@ -156,7 +151,8 @@ Not every finding fails the check:
   the same severity split that [`daedalus trace`](tracing-the-backlog.md#what-it-checks)
   applies to the traceability chain.
 
-A workspace whose only findings are warnings still conforms and still exits `0`.
+A workspace whose only findings are warnings still conforms (the `Conventions:`
+axis reports no errors) and still exits `0`.
 
 ## Validating definitions
 
@@ -185,18 +181,25 @@ exact spot inside it (a field, a phase, or a key), and what was expected versus
 what was found. Like the conventions report, the findings are deterministic and
 printed in a stable order, so the same workspace always produces the same output.
 
-For example, a manifest that lists a backend Daedalus does not support, and a
-workflow that loops back on itself, produce findings such as:
+For example, a manifest that lists a backend Daedalus does not support produces a
+`Definitions:` section with a count and one finding per problem. The finding
+names the file, the spot (`backends[...]`), the rule (`schema`), and what was
+observed versus expected:
 
 ```
-Definitions:
-  - [error] .daedalus/daedalus.yaml: backends: unsupported backend "acme-bot" (supported: claude-code)
-  - [error] .daedalus/workflows/sdd-default.yaml: dag: cycle detected through phase "review" -> "build" -> "review"
+Conventions: workspace conforms (no violations).
+Definitions: 1 error and 0 warnings:
+  - [error] .daedalus/daedalus.yaml: backends[nonexistent-backend]: schema: observed unsupported backend "nonexistent-backend"; expected one of the supported backends: claude-code
 ```
 
-To fix these you would set `backends` to a supported value and break the cycle in
-the workflow's dependencies, then run `daedalus validate` again to confirm both
-axes are clean.
+Because there is at least one definition error, the command exits `1`. To fix it
+you would set `backends` to a supported value (`claude-code`) and run `daedalus
+validate` again to confirm both axes are clean.
+
+The same `Definitions:` section reports the other definition families too — for
+example a workflow whose DAG loops back on itself is reported as a `dag` finding
+naming the cycle (`cycle detected through phase ...`). Fix the reported spot and
+run `daedalus validate` again to confirm both axes are clean.
 
 > A pristine `daedalus init` workspace lints clean: the built-in agents that the
 > seeded default workflow references count as **known**, so a freshly initialized
